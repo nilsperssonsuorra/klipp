@@ -16,7 +16,7 @@
 - Need more room or zoom? One click moves the capture, drawing and all, into an editor window. There, every change is copied to the clipboard right away.
 - Captures keep full resolution on high-DPI screens. A 4K screen at 150% scaling gives you 4K pixels.
 
-Klipp runs in the system tray and starts with Windows. You can turn that off in Settings.
+Klipp runs in the system tray. To have it start with Windows, turn that on in Settings.
 
 ## Install
 

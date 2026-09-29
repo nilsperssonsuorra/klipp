@@ -11,7 +11,7 @@ DEFAULTS = {
     # Hotkey syntax: modifiers (Ctrl, Alt, Shift, Win) + key, e.g. "Ctrl+Alt+S", "F9", "PrintScreen".
     "hotkey_copy": "Alt+S",
     "hotkey_edit": "Alt+Shift+S",
-    "autostart": True,
+    "autostart": False,  # mirrors the Run key; only Settings changes it (see autostart.py)
     "tray_click": "edit",  # "edit", "copy" or "none"
     "edit_mode": "inplace",  # capture-and-edit draws on the frozen screen ("inplace") or opens a "window"
     "snap_shapes": True,  # pausing at the end of a pen stroke turns a rough line/circle/box into a clean one

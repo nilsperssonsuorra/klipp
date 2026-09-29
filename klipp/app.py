@@ -93,15 +93,14 @@ class KlippApp(QObject):
         self.hotkeys.triggered.connect(self.capture)
         self._build_tray()
         self._register_hotkeys()
-        # Only the built exe claims autostart; running from source mustn't hijack the entry.
-        if getattr(sys, "frozen", False):
-            self._sync_autostart()
+        # Klipp never adds itself to autostart; that only happens from Settings (see autostart.py).
+        self.config["autostart"] = autostart.is_enabled()
         if self.config.first_run:
             self.tray.showMessage(
                 "Klipp is running",
                 f"{self.config['hotkey_copy']}: capture an area to the clipboard\n"
                 f"{self.config['hotkey_edit']}: capture an area and draw on it\n"
-                "Right-click the tray icon for settings.",
+                "Right-click the tray icon → Settings to start Klipp with Windows.",
                 QSystemTrayIcon.Information,
                 8000,
             )
@@ -146,11 +145,12 @@ class KlippApp(QObject):
             )
         return not errors
 
-    def _sync_autostart(self):
+    def _set_autostart(self, enabled):
         try:
-            autostart.set_enabled(bool(self.config["autostart"]))
+            autostart.set_enabled(enabled)
         except OSError:
             pass
+        self.config["autostart"] = autostart.is_enabled()
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger and self.config["tray_click"] in ("copy", "edit"):
@@ -172,6 +172,7 @@ class KlippApp(QObject):
         # Release our hotkeys so they can be re-recorded, and so the availability
         # check only reports conflicts with other programs.
         self.hotkeys.unregister_all()
+        self.config["autostart"] = autostart.is_enabled()  # show the real state
         self.settings_dialog = SettingsDialog(self.config, self.icon)
         self.settings_dialog.finished.connect(self._settings_closed)
         self.settings_dialog.show()
@@ -183,12 +184,12 @@ class KlippApp(QObject):
         dialog, self.settings_dialog = self.settings_dialog, None
         if result == QDialog.Accepted:
             values = dialog.values()
-            autostart_changed = values["autostart"] != self.config["autostart"]
+            if values["autostart"] != autostart.is_enabled():
+                self._set_autostart(values["autostart"])  # the user asked for this change
             self.config.data.update(values)
+            self.config["autostart"] = autostart.is_enabled()
             self.config.error = None
             self.config.save(SETTINGS_KEYS)
-            if autostart_changed:
-                self._sync_autostart()
         self._register_hotkeys()
         self._update_labels()
         dialog.deleteLater()

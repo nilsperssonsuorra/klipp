@@ -1,3 +1,9 @@
+"""Starting Klipp with Windows (the HKCU Run key).
+
+Only ever changed when the user asks for it in Settings. A freshly downloaded, unsigned
+program that adds itself to the Run key on first launch is exactly what Windows Defender's
+"Behavior:Win32/Persistence" detection looks for, and it blocks the program."""
+
 import sys
 import winreg
 from pathlib import Path
@@ -16,12 +22,13 @@ def launch_command():
 
 
 def is_enabled():
+    """True if Windows will start this copy of Klipp at login (not one in another folder)."""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            winreg.QueryValueEx(key, VALUE_NAME)
-            return True
+            value, _ = winreg.QueryValueEx(key, VALUE_NAME)
     except OSError:
         return False
+    return value.strip().lower() == launch_command().lower()
 
 
 def set_enabled(enabled):
