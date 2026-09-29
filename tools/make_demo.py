@@ -75,16 +75,6 @@ def paint_desktop(d):
         glow.setColorAt(1, QColor(0, 0, 0, 0))
         p.fillRect(QRectF(0, 0, W, H), glow)
 
-    # Taskbar.
-    p.fillRect(QRectF(0, H - 44, W, 44), QColor(16, 17, 20, 235))
-    for i, color in enumerate(("#2f7bff", "#ff9500", "#34c759", "#b44dff", "#ff3b30", "#00c2e0")):
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawRoundedRect(QRectF(W / 2 - 150 + i * 50, H - 34, 24, 24), 6, 6)
-    p.setPen(QColor("#dddddd"))
-    p.setFont(font(9))
-    p.drawText(QRectF(W - 110, H - 44, 90, 44), Qt.AlignCenter, "10:24\n2026-09-29")
-
     # A dashboard window to screenshot.
     win = QRectF(90, 30, 1180, 720)
     p.setPen(Qt.NoPen)
@@ -352,7 +342,7 @@ def main():
 
     def editor_layers():
         pm, (cx, cy) = window_chrome(editor.grab(), editor.windowTitle(), d)
-        ex, ey = (W - pm.width() / d) / 2, (H - 44 - pm.height() / d) / 2
+        ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2
         return [(desktop, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
 
     layers, origin = editor_layers()
