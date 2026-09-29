@@ -43,7 +43,7 @@ from klipp.settings import SettingsDialog
 
 W, H = 1280, 720  # logical size of the staged desktop
 FPS = 20
-OUT_WIDTH = 1200
+OUT_WIDTH = 1280
 DOCS = ROOT / "docs"
 
 
@@ -71,7 +71,6 @@ TERMINAL_LINES = [
 ]
 LINE_RECTS = []  # visible text of each terminal line, filled in by paint_desktop
 CHAT_INPUT = QRectF()
-POSTED = QRectF()  # the pasted chat message, filled in by paint_desktop
 
 
 def draw_window(p, rect, title, body, bar, text):
@@ -112,7 +111,6 @@ def chat_message(p, y, name, color, lines, image=None, d=1.0):
         p.drawText(QPointF(left + 50, ty), line)
         ty += 22
     if image is not None:
-        global POSTED
         w = min(CHAT.width() - 86, image.width() / d)
         h = image.height() / d * w / (image.width() / d)
         target = QRectF(left + 50, ty - 12, w, h)
@@ -123,13 +121,48 @@ def chat_message(p, y, name, color, lines, image=None, d=1.0):
         p.drawPixmap(target, image, QRectF(image.rect()))
         p.restore()
         ty += h + 4
-        POSTED = QRectF(left, y, 50 + w, ty - y)
     return ty + 14
 
 
-def paint_desktop(d, posted=None):
+def draw_composer(p, focused=False, attachment=None, text="", d=1.0):
+    """The chat's message box. After a paste it grows to show the image as an attachment."""
+    box = QRectF(CHAT_INPUT)
+    if attachment is not None:
+        box.setTop(box.top() - 138)
+    p.setPen(QPen(QColor("#2f7bff"), 1.5) if focused else Qt.NoPen)
+    p.setBrush(QColor("#383a40"))
+    p.drawRoundedRect(box, 8, 8)
+    if attachment is not None:
+        tile = QRectF(box.left() + 14, box.top() + 14, 190, 118)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2b2d31"))
+        p.drawRoundedRect(tile, 6, 6)
+        area = tile.adjusted(8, 8, -8, -26)
+        scale = min(area.width() / (attachment.width() / d), area.height() / (attachment.height() / d))
+        w, h = attachment.width() / d * scale, attachment.height() / d * scale
+        p.drawPixmap(QRectF(area.center().x() - w / 2, area.center().y() - h / 2, w, h),
+                     attachment, QRectF(attachment.rect()))
+        p.setPen(QColor("#b5bac1"))
+        p.setFont(font(8))
+        p.drawText(QRectF(tile.left() + 10, tile.bottom() - 24, tile.width() - 20, 20), Qt.AlignVCenter, "image.png")
+    line = QRectF(CHAT_INPUT.left() + 16, CHAT_INPUT.top(), CHAT_INPUT.width() - 32, CHAT_INPUT.height())
+    p.setFont(font(10))
+    if text:
+        p.setPen(QColor("#dbdee1"))
+        p.drawText(line, Qt.AlignVCenter, text)
+    else:
+        p.setPen(QColor("#80848e"))
+        p.drawText(line, Qt.AlignVCenter, "Message #deploys")
+    if focused:
+        x = line.left() + (QFontMetrics(font(10)).horizontalAdvance(text) + 1 if text else 0)
+        p.setPen(QPen(QColor("#dbdee1"), 1.4))
+        p.drawLine(QPointF(x, line.center().y() - 9), QPointF(x, line.center().y() + 9))
+
+
+def paint_desktop(d, posted=None, composer=None):
     """The staged desktop: a terminal with a failed deploy next to a team chat.
-    `posted` is the annotated capture, shown as a new chat message after the paste."""
+    `posted` is the annotated capture, shown as a new chat message after sending.
+    `composer` holds the message box state: focused, attachment, text."""
     pm = QPixmap(int(W * d), int(H * d))
     pm.setDevicePixelRatio(d)
     p = QPainter(pm)
@@ -172,12 +205,7 @@ def paint_desktop(d, posted=None):
         chat_message(p, y, "You", "#2f7bff", ["getting this, any idea?"], posted, d)
     global CHAT_INPUT
     CHAT_INPUT = QRectF(CHAT.left() + 16, CHAT.bottom() - 66, CHAT.width() - 32, 48)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor("#383a40"))
-    p.drawRoundedRect(CHAT_INPUT, 8, 8)
-    p.setPen(QColor("#80848e"))
-    p.setFont(font(10))
-    p.drawText(CHAT_INPUT.adjusted(16, 0, 0, 0), Qt.AlignVCenter, "Message #deploys")
+    draw_composer(p, d=d, **(composer or {}))
     p.end()
     return pm
 
@@ -185,68 +213,26 @@ def paint_desktop(d, posted=None):
 # --- frame helpers ----------------------------------------------------------------
 
 
-def camera_rect(cx, cy, width):
-    """A W:H shaped view of the scene centred on (cx, cy), kept inside the frame."""
-    width = min(width, W)
-    height = width * H / W
-    x = min(max(cx - width / 2, 0), W - width)
-    y = min(max(cy - height / 2, 0), H - height)
-    return QRectF(x, y, width, height)
-
-
-FULL_VIEW = QRectF(0, 0, W, H)
-
-
 class Recorder:
-    """Collects frames. A virtual camera can zoom into part of the scene; captions,
-    badges and the cursor are drawn afterwards so they keep their size."""
-
     def __init__(self, d):
         self.d = d
         self.frames = []
-        self.camera = QRectF(FULL_VIEW)
-        self._move = None  # (from, to, steps, step) while the camera is gliding
-
-    def glide(self, target, steps):
-        self._move = (QRectF(self.camera), target, steps, 0)
-
-    def _advance_camera(self):
-        if self._move is None:
-            return
-        a, b, steps, step = self._move
-        step += 1
-        t = 0.5 - math.cos(math.pi * step / steps) / 2
-        self.camera = QRectF(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
-                             a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t)
-        self._move = None if step >= steps else (a, b, steps, step)
 
     def frame(self, layers, cursor=None, badge=None, caption=None, repeat=1):
-        scene = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
-        scene.setDevicePixelRatio(self.d)
-        p = QPainter(scene)
+        img = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
+        img.setDevicePixelRatio(self.d)
+        p = QPainter(img)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
         for pm, pos in layers:
             p.drawPixmap(QPointF(*pos), pm)
+        if caption:
+            draw_caption(p, caption)
+        if badge:
+            draw_badge(p, badge)
+        if cursor:
+            draw_cursor(p, *cursor)
         p.end()
-        for _ in range(repeat):
-            self._advance_camera()
-            cam, zoom = self.camera, W / self.camera.width()
-            img = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
-            img.setDevicePixelRatio(self.d)
-            p = QPainter(img)
-            p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
-            source = QRectF(cam.x() * self.d, cam.y() * self.d, cam.width() * self.d, cam.height() * self.d)
-            p.drawImage(QRectF(0, 0, W, H), scene, source)
-            if caption:
-                draw_caption(p, caption)
-            if badge:
-                draw_badge(p, badge)
-            if cursor:
-                kind, pos, *size = cursor
-                screen_pos = ((pos[0] - cam.x()) * zoom, (pos[1] - cam.y()) * zoom)
-                draw_cursor(p, kind, screen_pos, (size[0] if size else 0) * zoom)
-            p.end()
-            self.frames.append(img)
+        self.frames.extend([img] * repeat)
 
 
 def draw_badge(p, badge):
@@ -332,6 +318,12 @@ def draw_cursor(p, kind, pos, size=0.0):
             p.setPen(QPen(color, width))
             p.drawLine(QPointF(x - 11, y), QPointF(x + 11, y))
             p.drawLine(QPointF(x, y - 11), QPointF(x, y + 11))
+    elif kind == "ibeam":
+        for color, width in ((QColor(0, 0, 0, 200), 3.2), (QColor("#ffffff"), 1.4)):
+            p.setPen(QPen(color, width))
+            p.drawLine(QPointF(x, y - 9), QPointF(x, y + 9))
+            p.drawLine(QPointF(x - 4, y - 10), QPointF(x + 4, y - 10))
+            p.drawLine(QPointF(x - 4, y + 10), QPointF(x + 4, y + 10))
     elif kind == "brush":
         r = max(size, 4) / 2
         p.setBrush(Qt.NoBrush)
@@ -444,17 +436,10 @@ def main():
     QApplication.processEvents()
     vp = editor.canvas.viewport()
 
-    # While the editor is open the desktop behind it is dimmed, so the zoomed-in view stays calm.
-    dim = QPixmap(int(W * d), int(H * d))
-    dim.setDevicePixelRatio(d)
-    dim.fill(QColor(8, 9, 12, 200))
-    window = {}
-
     def editor_layers():
         pm, (cx, cy) = window_chrome(editor.grab(), editor.windowTitle(), d)
         ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2 - 40
-        window["rect"] = QRectF(ex + 26, ey + 26, pm.width() / d - 52, pm.height() / d - 52)
-        return [(desktop, (0, 0)), (dim, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
+        return [(desktop, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
 
     def to_frame(vp_pos):
         _, origin = editor_layers()
@@ -487,11 +472,7 @@ def main():
         for i in range(frames):
             frame(("brush", lerp(a, b, (i + 1) / frames), brush(tool)), caption)
 
-    # 2) Zoom in on the capture and circle the wrong line by mistake...
-    editor_layers()
-    win = window["rect"]
-    focus = camera_rect(win.center().x(), win.center().y(), 900)
-    rec.glide(focus, 10)
+    # 2) Circle the wrong line by mistake...
     frame(("arrow", end), repeat=6)
     wrong = ellipse_around(LINE_RECTS[5], 16, 10, points=22)
     move(end, to_frame(to_vp(wrong[0])), 6)
@@ -515,19 +496,27 @@ def main():
     editor.copy_to_clipboard()
     frame(("arrow", at), repeat=12)
 
-    # 3) Zoom back out and paste into the chat. The editor copied it already.
-    rec.glide(QRectF(FULL_VIEW), 10)
-    target = (CHAT_INPUT.left() + 150, CHAT_INPUT.center().y())
-    for i in range(12):
-        rec.frame([(desktop, (0, 0))], ("arrow", lerp(at, target, (i + 1) / 12)))
-    rec.frame([(desktop, (0, 0))], ("arrow", target), badge=["Ctrl", "V"], repeat=8)
+    # 3) Paste into the chat and send. The editor put the image on the clipboard already.
     posted = QPixmap.fromImage(editor.canvas.render_image())
     posted.setDevicePixelRatio(d)
-    after = paint_desktop(d, posted)
-    # Frame the whole conversation, leaving room at the top for the caption.
-    top, bottom = CHAT.top() + 38 - 60, POSTED.bottom() + 24
-    rec.glide(camera_rect(CHAT.center().x(), (top + bottom) / 2, (bottom - top) * W / H), 12)
-    rec.frame([(after, (0, 0))], ("arrow", target), caption="Pasted. It was already on your clipboard.", repeat=50)
+
+    def chat(repeat=1, cursor=None, badge=None, caption=None, **composer):
+        rec.frame([(paint_desktop(d, composer.pop("posted", None), composer), (0, 0))],
+                  cursor, badge=badge, caption=caption, repeat=repeat)
+
+    target = (CHAT_INPUT.right() - 50, CHAT_INPUT.center().y())  # clear of the text being typed
+    for i in range(12):
+        chat(cursor=("arrow", lerp(at, target, (i + 1) / 12)))
+    chat(4, ("ibeam", target))
+    chat(6, ("ibeam", target), focused=True)                                      # clicked: the box has focus
+    chat(6, ("ibeam", target), badge=["Ctrl", "V"], focused=True)
+    chat(8, ("ibeam", target), badge=["Ctrl", "V"], focused=True, attachment=posted)  # pasted as an attachment
+    message = "getting this, any idea?"
+    for n in range(2, len(message) + 2, 2):
+        chat(1, ("ibeam", target), focused=True, attachment=posted, text=message[:n])
+    chat(6, ("ibeam", target), focused=True, attachment=posted, text=message)
+    chat(6, ("ibeam", target), badge=["Enter"], focused=True, attachment=posted, text=message)
+    chat(50, ("ibeam", target), caption="Sent. No saving, no file picker.", focused=True, posted=posted)
 
     # --- encode ------------------------------------------------------------------
     tmp = Path(tempfile.mkdtemp(prefix="klipp-demo-"))
