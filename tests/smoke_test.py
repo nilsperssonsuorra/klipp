@@ -42,6 +42,7 @@ def strokes(canvas):
 def scratch_config(**overrides):
     """In-memory config that never touches the user's real settings file."""
     config = Config(json.loads(json.dumps(DEFAULTS)))
+    config["check_updates"] = False  # tests never contact GitHub
     config.data.update(overrides)
     config.save = lambda keys: None
     return config
@@ -431,6 +432,49 @@ def test_finish_gestures():
     app.tray.hide()
 
 
+def test_updates():
+    import klipp.updates as updates
+    from klipp import __version__
+    from klipp.app import KlippApp
+
+    check(updates.parse_version("v1.10.2") > updates.parse_version("1.9.9"), "versions compare as numbers, not text")
+    check(updates.parse_version("v1.1.2") == updates.parse_version("1.1.2"), "a leading v doesn't matter")
+
+    config = scratch_config(hotkey_copy="Ctrl+Alt+Shift+F11", hotkey_edit="Ctrl+Alt+Shift+F12", check_updates=True)
+    app = KlippApp(QApplication.instance(), config)
+    messages = []
+    app.tray.showMessage = lambda title, *rest: messages.append(title)
+    real_fetch = updates.fetch_latest
+    try:
+        updates.fetch_latest = lambda: ("0.0.1", "https://example.invalid/old")
+        app.updates.check()
+        QTest.qWait(300)
+        check(not app.update_action.isVisible() and not messages, "an older release is ignored")
+
+        updates.fetch_latest = lambda: ("99.0.0", "https://example.invalid/new")
+        app.updates.check()
+        wait_for(lambda: app.update_action.isVisible())
+        check(app.update_action.isVisible() and "99.0.0" in app.update_action.text(),
+              "a newer release adds an update item to the tray menu")
+        check(messages == ["Klipp 99.0.0 is available"], "and shows one notification")
+        app.updates.check()
+        QTest.qWait(300)
+        check(len(messages) == 1, "the same version is never announced twice")
+
+        def offline():
+            raise OSError("no network")
+        updates.fetch_latest = offline
+        app.updates.check()
+        QTest.qWait(300)
+        check(True, "a failed check is silent")
+    finally:
+        updates.fetch_latest = real_fetch
+    app.updates.stop()
+    app.hotkeys.unregister_all()
+    app.tray.hide()
+    print(f"  (running version {__version__})")
+
+
 def test_hotkey_flow():
     from klipp.app import KlippApp
 
@@ -483,6 +527,7 @@ if __name__ == "__main__":
     test_snapping()
     test_draw_on_screen()
     test_finish_gestures()
+    test_updates()
     test_hotkey_flow()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

@@ -225,6 +225,8 @@ class SettingsDialog(QDialog):
         tray_row.addWidget(self.tray_click)
         tray_row.addStretch(1)
         root.addLayout(tray_row)
+        self.check_updates = QCheckBox("Tell me when a new version is out (checks GitHub once a day)")
+        root.addWidget(self.check_updates)
 
         # Footer ---------------------------------------------------------------
         root.addSpacing(14)
@@ -257,6 +259,7 @@ class SettingsDialog(QDialog):
         self.folder.setText(data["save_dir"])
         self.auto_save.setChecked(data["auto_save"])
         self.autostart.setChecked(data["autostart"])
+        self.check_updates.setChecked(data["check_updates"])
         index = self.tray_click.findData(data["tray_click"])
         self.tray_click.setCurrentIndex(max(index, 0))
         self.edit_mode.setCurrentIndex(max(self.edit_mode.findData(data["edit_mode"]), 0))
@@ -299,6 +302,7 @@ class SettingsDialog(QDialog):
             "auto_save": self.auto_save.isChecked(),
             "autostart": self.autostart.isChecked(),
             "tray_click": self.tray_click.currentData(),
+            "check_updates": self.check_updates.isChecked(),
             "edit_mode": self.edit_mode.currentData(),
             "snap_shapes": self.snap_shapes.isChecked(),
         }

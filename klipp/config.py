@@ -20,6 +20,8 @@ DEFAULTS = {
     "dim": 45,  # how much the frozen screen is darkened outside the selection, in percent
     "save_dir": "",  # empty means Pictures\Klipp
     "auto_save": False,  # also save every capture as a PNG in save_dir
+    "check_updates": True,  # ask GitHub once a day whether a newer release exists
+    "notified_version": "",  # newest version the user was already told about
     # Editor state, remembered between sessions.
     "last_save_dir": "",  # where "Save as" was last used
     "tool": "pen",
@@ -38,7 +40,7 @@ DEFAULTS = {
 EDITOR_KEYS = ("tool", "color", "sizes", "last_save_dir")
 SETTINGS_KEYS = (
     "hotkey_copy", "hotkey_edit", "autostart", "tray_click", "show_toast",
-    "crosshair", "dim", "save_dir", "auto_save", "edit_mode", "snap_shapes",
+    "crosshair", "dim", "save_dir", "auto_save", "edit_mode", "snap_shapes", "check_updates",
 )
 
 

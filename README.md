@@ -12,7 +12,7 @@
 - **Ctrl+V is the last step.** It unfreezes the screen and pastes your capture, drawing included, into the window you were in. No Copy button, no saving, no file picker.
 - **Mistakes are cheap.** Hold the right mouse button and drag to erase whole strokes, whichever tool you're using. Ctrl+Z works too.
 - **Rough is fine.** Pause for a moment at the end of a pen stroke and a wobbly circle, box or line turns into a clean one.
-- **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account, it never connects to the internet, and it collects nothing.
+- **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account and it collects nothing. The only thing it ever contacts is GitHub, once a day, to see whether a new version is out, and you can turn that off in Settings.
 
 ## What it does
 
@@ -95,6 +95,7 @@ The other settings:
 - Choose how dark the screen gets outside the selection.
 - Pick a folder for saved captures, and optionally save every capture there as a PNG. The default folder is `Pictures\Klipp`.
 - Start with Windows.
+- Get a notice when a new version is out. Klipp asks GitHub once a day and tells you once per version. Clicking the notice opens the download page.
 - Choose what a left-click on the tray icon does.
 
 Settings are stored in `%APPDATA%\Klipp\config.json`. You can edit that file by hand while Klipp isn't running.

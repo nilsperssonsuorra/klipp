@@ -4,8 +4,8 @@ import sys
 import traceback
 from datetime import datetime
 
-from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter
+from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QGuiApplication, QPainter
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QWidget
 
 from . import autostart, icons
@@ -15,6 +15,7 @@ from .editor import EditorWindow, save_image_dialog
 from .hotkeys import HotkeyWindow
 from .overlay import SelectionOverlay
 from .settings import SettingsDialog
+from .updates import UpdateChecker
 
 MUTEX_NAME = "Local\\Klipp.SingleInstance"
 ERROR_ALREADY_EXISTS = 183
@@ -88,11 +89,17 @@ class KlippApp(QObject):
         self._toast = None
         self._previous_window = None  # window to hand focus back to after a copy capture
         self._paste_into = None  # window to paste into once the frozen screen has gone
+        self._update_url = None  # release page of a newer version, once one is found
+        self._message = None  # what the last tray notification was about, for clicks on it
 
         self.hotkeys = HotkeyWindow()
         self.hotkeys.triggered.connect(self.capture)
         self._build_tray()
         self._register_hotkeys()
+        self.updates = UpdateChecker(self)
+        self.updates.found.connect(self._update_available)
+        if self.config["check_updates"]:
+            self.updates.start()
         # Klipp never adds itself to autostart; that only happens from Settings (see autostart.py).
         self.config["autostart"] = autostart.is_enabled()
         if self.config.first_run:
@@ -108,6 +115,9 @@ class KlippApp(QObject):
     def _build_tray(self):
         self.tray = QSystemTrayIcon(self.icon, self)
         menu = QMenu()
+        self.update_action = menu.addAction("")
+        self.update_action.triggered.connect(self._open_update_page)
+        self.update_action.setVisible(False)
         self.copy_action = menu.addAction("")
         self.copy_action.triggered.connect(lambda: QTimer.singleShot(250, lambda: self.capture("copy")))
         self.edit_action = menu.addAction("")
@@ -120,6 +130,7 @@ class KlippApp(QObject):
         self._menu = menu
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
+        self.tray.messageClicked.connect(self._message_clicked)
         self._update_labels()
         self.tray.show()
 
@@ -151,6 +162,26 @@ class KlippApp(QObject):
         except OSError:
             pass
         self.config["autostart"] = autostart.is_enabled()
+
+    def _update_available(self, version, url):
+        self._update_url = url
+        self.update_action.setText(f"Klipp {version} is available…")
+        self.update_action.setVisible(True)
+        if self.config["notified_version"] != version:  # tell once per version, never nag
+            self.config["notified_version"] = version
+            self.config.save(["notified_version"])
+            self._message = "update"
+            self.tray.showMessage(f"Klipp {version} is available", "Click here to open the download page.",
+                                  QSystemTrayIcon.Information, 10000)
+
+    def _open_update_page(self):
+        if self._update_url:
+            QDesktopServices.openUrl(QUrl(self._update_url))
+
+    def _message_clicked(self):
+        if self._message == "update":
+            self._open_update_page()
+        self._message = None
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.Trigger and self.config["tray_click"] in ("copy", "edit"):
@@ -190,6 +221,10 @@ class KlippApp(QObject):
             self.config["autostart"] = autostart.is_enabled()
             self.config.error = None
             self.config.save(SETTINGS_KEYS)
+            if self.config["check_updates"]:
+                self.updates.start()
+            else:
+                self.updates.stop()
         self._register_hotkeys()
         self._update_labels()
         dialog.deleteLater()
