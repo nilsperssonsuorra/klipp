@@ -291,8 +291,8 @@ class SelectionOverlay(QWidget):
         self.toolbar.done_button.clicked.connect(lambda: self._done("copy"))
         self.canvas.finishRequested.connect(lambda: self._done("copy"))
         self.toolbar.panel.install_shortcuts(self)
-        for key in ("Space", "Return", "Enter", "Ctrl+C"):
-            QShortcut(QKeySequence(key), self, activated=lambda: self._done("copy"))
+        # Space and Enter finish from the canvas itself, so they can type into a label instead.
+        QShortcut(QKeySequence("Ctrl+C"), self, activated=lambda: self._done("copy"))
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: self._done("save"))
         # The paste you were about to do anyway: copy, close, and paste where you came from.
         QShortcut(QKeySequence("Ctrl+V"), self, activated=lambda: self._done("paste"))

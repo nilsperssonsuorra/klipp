@@ -5,10 +5,11 @@ import math
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QFont,
     QGuiApplication,
     QImage,
     QKeySequence,
@@ -18,6 +19,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTextCursor,
     QTransform,
     QUndoCommand,
     QUndoStack,
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
+    QGraphicsTextItem,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
@@ -60,13 +63,14 @@ PALETTE = [
 ]
 
 TOOLS = [
-    ("pen", "Pen", "P"),
-    ("highlighter", "Highlighter", "H"),
-    ("line", "Line", "L"),
-    ("arrow", "Arrow", "A"),
-    ("rect", "Rectangle", "R"),
-    ("ellipse", "Ellipse", "O"),
-    ("eraser", "Eraser", "E"),
+    ("pen", "Pen"),
+    ("highlighter", "Highlighter"),
+    ("line", "Line"),
+    ("arrow", "Arrow"),
+    ("rect", "Rectangle"),
+    ("ellipse", "Ellipse"),
+    ("text", "Text (or just start typing)"),
+    ("eraser", "Eraser"),
 ]
 FREEHAND = ("pen", "highlighter")
 HIGHLIGHTER_ALPHA = 110
@@ -138,6 +142,84 @@ class RemoveItems(AddItems):
 
     def undo(self):
         AddItems.redo(self)
+
+
+class TextItem(QGraphicsTextItem):
+    """A typed label: a small rounded tag in the chosen colour with white or black text,
+    whichever contrasts. It reads the same on light and dark screenshots."""
+
+    done = Signal()  # Enter or Esc while typing
+
+    def __init__(self, color, pixel_size):
+        super().__init__()
+        self._color = QColor(color)
+        self.set_pixel_size(pixel_size)
+        self.set_color(color)
+
+    def color(self):
+        return QColor(self._color)
+
+    def pixel_size(self):
+        return self.font().pixelSize()
+
+    def set_color(self, color):
+        self._color = QColor(color)
+        r, g, b = self._color.redF(), self._color.greenF(), self._color.blueF()
+        light_tag = 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.55  # yellow, cyan, white...
+        self.setDefaultTextColor(QColor("#111111") if light_tag else QColor("#ffffff"))
+        self.update()
+
+    def set_pixel_size(self, size):
+        font = QFont("Segoe UI")
+        font.setPixelSize(max(6, round(size)))
+        font.setWeight(QFont.DemiBold)
+        self.setFont(font)
+        self.document().setDocumentMargin(max(2.0, size * 0.22))
+
+    def paint(self, painter, option, widget=None):
+        rect = self.boundingRect()
+        radius = min(rect.height() / 2, self.font().pixelSize() * 0.35)
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.restore()
+        super().paint(painter, option, widget)
+
+    def keyPressEvent(self, event):
+        finishing = event.key() in (Qt.Key_Return, Qt.Key_Enter) and not event.modifiers() & Qt.ShiftModifier
+        if finishing or event.key() == Qt.Key_Escape:
+            event.accept()
+            self.done.emit()
+            return
+        super().keyPressEvent(event)
+
+    def sceneEvent(self, event):
+        # Let the window's Ctrl shortcuts (copy, paste into the chat, undo) win while typing.
+        if event.type() == QEvent.ShortcutOverride and event.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+            if not (event.modifiers() & Qt.ControlModifier and event.modifiers() & Qt.AltModifier):  # AltGr types
+                event.ignore()
+                return False
+        return super().sceneEvent(event)
+
+    def collidesWithPath(self, path, mode=Qt.IntersectsItemShape):
+        return path.intersects(self.shape())  # see StrokeItem.collidesWithPath
+
+
+class EditText(QUndoCommand):
+    """Changing the words of an existing label."""
+
+    def __init__(self, item, before, after):
+        super().__init__("Edit text")
+        self.item, self.before, self.after = item, before, after
+
+    def redo(self):
+        if self.item.toPlainText() != self.after:
+            self.item.setPlainText(self.after)
+
+    def undo(self):
+        self.item.setPlainText(self.before)
 
 
 # --- geometry helpers --------------------------------------------------------
@@ -288,6 +370,10 @@ class Canvas(QGraphicsView):
         self._snapped = False
         self._snap_timer = QTimer(self, singleShot=True, interval=SNAP_DELAY_MS, timeout=self._try_snap)
         self._inside = True  # embedded: is the pointer over the selection?
+        self._pointer = None  # where the pointer last was, in scene px (new labels start there)
+        self._editing = None  # the label being typed into
+        self._edit_new = False
+        self._edit_before = ""
         self._press = None  # embedded: where a left press outside the selection began
 
     # zoom ------------------------------------------------------------------
@@ -349,6 +435,8 @@ class Canvas(QGraphicsView):
             self.viewport().setCursor(Qt.ArrowCursor)  # clicking out here finishes
         elif tool in FREEHAND or tool == "eraser":
             self.viewport().setCursor(circle_cursor(self.size_for(tool) * self.zoom, self.dpr))
+        elif tool == "text":
+            self.viewport().setCursor(Qt.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CrossCursor)
 
@@ -359,7 +447,100 @@ class Canvas(QGraphicsView):
         return QPen(color, self.size_for(self.tool), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
     def strokes(self):
-        return [item for item in self.layer.childItems() if isinstance(item, StrokeItem)]
+        """Everything drawn or typed."""
+        return [item for item in self.layer.childItems() if isinstance(item, (StrokeItem, TextItem))]
+
+    # text labels -------------------------------------------------------------
+
+    def keyPressEvent(self, event):
+        if self._editing is not None:
+            super().keyPressEvent(event)  # goes to the label being typed into
+            return
+        key, mods = event.key(), event.modifiers()
+        altgr = mods & Qt.ControlModifier and mods & Qt.AltModifier
+        plain = altgr or not mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
+        if plain and key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            if self.embedded:
+                self.finishRequested.emit()
+            return
+        text = event.text()
+        if plain and text and text.isprintable() and not text.isspace():
+            self.start_text(self._text_anchor(), text)  # just start typing: a label at the pointer
+            return
+        super().keyPressEvent(event)
+
+    def _text_anchor(self):
+        pos = self._pointer
+        if pos is None:
+            local = self.viewport().mapFromGlobal(QCursor.pos())
+            pos = self.viewportTransform().inverted()[0].map(QPointF(local))
+        if not self.region.contains(pos):
+            pos = self.region.topLeft() + QPointF(16 / self.zoom, 24 / self.zoom)
+        return pos
+
+    def _text_at(self, pos):
+        for item in self.scene().items(pos):
+            if isinstance(item, TextItem):
+                return item
+        return None
+
+    def start_text(self, pos, text=""):
+        """A new label whose left edge is just right of `pos`, vertically centred on it."""
+        self.commit_text()
+        item = TextItem(self.color, self.size_for("text"))
+        item.setPos(pos.x() + 4 / self.zoom, pos.y() - item.boundingRect().height() / 2)
+        self._z += 1
+        item.setZValue(self._z)
+        item.setParentItem(self.layer)
+        self._begin_edit(item, new=True)
+        if text:
+            cursor = item.textCursor()
+            cursor.insertText(text)
+            item.setTextCursor(cursor)
+        return item
+
+    def _begin_edit(self, item, new=False):
+        self._editing, self._edit_new, self._edit_before = item, new, item.toPlainText()
+        item.done.connect(self.commit_text)
+        item.setTextInteractionFlags(Qt.TextEditorInteraction)
+        self.setFocus()
+        item.setFocus()
+        cursor = item.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        item.setTextCursor(cursor)
+
+    def commit_text(self):
+        """Stop typing into the current label and record it for undo."""
+        item, self._editing = self._editing, None
+        if item is None:
+            return
+        item.done.disconnect(self.commit_text)
+        cursor = item.textCursor()
+        cursor.clearSelection()
+        item.setTextCursor(cursor)
+        item.setTextInteractionFlags(Qt.NoTextInteraction)
+        item.clearFocus()
+        text = item.toPlainText()
+        if self._edit_new:
+            if text.strip():
+                self.undo_stack.push(AddItems(self.layer, [item], "Text"))
+            else:
+                self.scene().removeItem(item)
+        elif text != self._edit_before:
+            if text.strip():
+                self.undo_stack.push(EditText(item, self._edit_before, text))
+            else:
+                item.setPlainText(self._edit_before)
+                self.undo_stack.push(RemoveItems(self.layer, [item]))
+        self.setFocus()
+
+    def undo(self):
+        self.commit_text()
+        self.undo_stack.undo()
+
+    def redo(self):
+        self.commit_text()
+        self.undo_stack.redo()
 
     # mouse -------------------------------------------------------------------
 
@@ -373,6 +554,20 @@ class Canvas(QGraphicsView):
         button = event.button()
         pos = self._scene_pos(event)
         self._button = button
+        label = self._text_at(pos)
+        if self._editing is not None:
+            if label is self._editing and button == Qt.LeftButton:
+                self._mode = "text"  # moving the caret or selecting inside the label
+                super().mousePressEvent(event)
+                return
+            self.commit_text()
+            if button == Qt.LeftButton:
+                return  # this click just ends the label
+        if button == Qt.LeftButton and label is not None and self.tool != "eraser":
+            self._begin_edit(label)  # click a label to change its words
+            self._mode = "text"
+            super().mousePressEvent(event)
+            return
         if button == Qt.LeftButton and self.embedded and not self.region.contains(pos):
             self._mode = "outside"  # a click (not a drag) out here finishes, see _finish()
             self._press = event.position()
@@ -386,6 +581,8 @@ class Canvas(QGraphicsView):
             self._last = pos
             self.update_cursor("eraser")
             self._erase_along(pos, pos)
+        elif button == Qt.LeftButton and self.tool == "text":
+            self.start_text(pos)
         elif button == Qt.LeftButton:
             self._mode = "draw"
             self._draw_tool = self.tool
@@ -399,9 +596,13 @@ class Canvas(QGraphicsView):
             self._update_shape(pos, event.modifiers())
 
     def mouseMoveEvent(self, event):
+        self._pointer = self._scene_pos(event)
         if self._mode is not None and not (event.buttons() & self._button):
             # The release went missing (e.g. focus was stolen mid-drag); don't get stuck.
             self._finish()
+            return
+        if self._mode == "text":
+            super().mouseMoveEvent(event)
             return
         if self.embedded and self._mode is None:
             inside = self.region.contains(self._scene_pos(event))
@@ -424,6 +625,8 @@ class Canvas(QGraphicsView):
             self._update_shape(self._scene_pos(event), event.modifiers())
 
     def mouseReleaseEvent(self, event):
+        if self._mode == "text":
+            super().mouseReleaseEvent(event)
         if self._mode is not None and event.button() == self._button:
             self._finish()
 
@@ -502,7 +705,7 @@ class Canvas(QGraphicsView):
         segment.lineTo(b if b != a else b + QPointF(0.01, 0))
         area = stroker.createStroke(segment)
         for item in self.scene().items(area, Qt.IntersectsItemShape):
-            if isinstance(item, StrokeItem):
+            if isinstance(item, (StrokeItem, TextItem)):
                 self.scene().removeItem(item)
                 self._erased.append(item)
 
@@ -514,6 +717,7 @@ class Canvas(QGraphicsView):
             self.undo_stack.push(RemoveItems(self.layer, items, "Clear"))
 
     def render_image(self):
+        self.commit_text()  # no caret or half-typed state in the output
         rect = self.region
         image = QImage(round(rect.width()), round(rect.height()), QImage.Format_RGB32)
         image.fill(Qt.black)
@@ -524,20 +728,32 @@ class Canvas(QGraphicsView):
         return image
 
     def export_strokes(self):
-        """The drawing, relative to the region's corner, for handing to another canvas."""
+        """The drawing and labels, relative to the region's corner, for another canvas."""
+        self.commit_text()
         offset = self.region.topLeft()
-        return [
-            (QPen(item.pen()), item.brush().style() != Qt.NoBrush, item.path().translated(-offset), item.zValue())
-            for item in sorted(self.strokes(), key=lambda i: i.zValue())
-        ]
+        marks = []
+        for item in sorted(self.strokes(), key=lambda i: i.zValue()):
+            if isinstance(item, TextItem):
+                marks.append({"kind": "text", "text": item.toPlainText(), "color": item.color(),
+                              "size": item.pixel_size(), "pos": item.pos() - offset, "z": item.zValue()})
+            else:
+                marks.append({"kind": "stroke", "pen": QPen(item.pen()), "filled": item.brush().style() != Qt.NoBrush,
+                              "path": item.path().translated(-offset), "z": item.zValue()})
+        return marks
 
-    def import_strokes(self, strokes):
-        for pen, filled, path, z in strokes:
-            item = StrokeItem(pen, filled)
-            item.set_path(path.translated(self.region.topLeft()))
-            item.setZValue(z)
+    def import_strokes(self, marks):
+        offset = self.region.topLeft()
+        for mark in marks:
+            if mark["kind"] == "text":
+                item = TextItem(mark["color"], mark["size"])
+                item.setPlainText(mark["text"])
+                item.setPos(mark["pos"] + offset)
+            else:
+                item = StrokeItem(mark["pen"], mark["filled"])
+                item.set_path(mark["path"].translated(offset))
+            item.setZValue(mark["z"])
             item.setParentItem(self.layer)
-            self._z = max(self._z, z)
+            self._z = max(self._z, mark["z"])
 
 
 # --- tool panel ---------------------------------------------------------------
@@ -610,8 +826,8 @@ class ToolPanel(QWidget):
 
         self.tool_group = QButtonGroup(self, exclusive=True)
         self.tool_buttons = {}
-        for key, name, shortcut in TOOLS:
-            btn = icon_button(icons.tool_icon(key), f"{name} ({shortcut})", checkable=True)
+        for key, name in TOOLS:
+            btn = icon_button(icons.tool_icon(key), name, checkable=True)
             btn.clicked.connect(lambda _=False, k=key: self.select_tool(k))
             self.tool_group.addButton(btn)
             self.tool_buttons[key] = btn
@@ -623,9 +839,8 @@ class ToolPanel(QWidget):
 
         self.color_group = QButtonGroup(self, exclusive=True)
         self.swatches = []
-        for i, (name, color) in enumerate(PALETTE):
-            key_hint = f" ({(i + 1) % 10})" if i < 10 else ""
-            swatch = Swatch(name + key_hint, color)
+        for name, color in PALETTE:
+            swatch = Swatch(name, color)
             swatch.clicked.connect(lambda _=False, c=color: self.select_color(c))
             self.color_group.addButton(swatch)
             self.swatches.append(swatch)
@@ -638,7 +853,7 @@ class ToolPanel(QWidget):
         self.size_slider = QSlider(Qt.Horizontal)
         self.size_slider.setRange(1, MAX_SIZE)
         self.size_slider.setFixedWidth(110)
-        self.size_slider.setToolTip("Size  ( -  and  + )")
+        self.size_slider.setToolTip("Size")
         self.size_slider.setFocusPolicy(Qt.NoFocus)
         self.size_slider.valueChanged.connect(self._size_changed)
         row.addWidget(self.size_slider)
@@ -652,12 +867,12 @@ class ToolPanel(QWidget):
         row.addSpacing(8)
 
         self.undo_button = icon_button(icons.tool_icon("undo"), "Undo (Ctrl+Z)")
-        self.undo_button.clicked.connect(canvas.undo_stack.undo)
+        self.undo_button.clicked.connect(canvas.undo)
         self.undo_button.setEnabled(False)
         canvas.undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
         row.addWidget(self.undo_button)
         self.redo_button = icon_button(icons.tool_icon("redo"), "Redo (Ctrl+Y)")
-        self.redo_button.clicked.connect(canvas.undo_stack.redo)
+        self.redo_button.clicked.connect(canvas.redo)
         self.redo_button.setEnabled(False)
         canvas.undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
         row.addWidget(self.redo_button)
@@ -670,22 +885,15 @@ class ToolPanel(QWidget):
         self.select_color(config["color"])
 
     def install_shortcuts(self, host):
-        """Tool, colour, size and undo keys, active while `host`'s window has focus."""
+        """Undo and redo, active while `host`'s window has focus. There are no single-key
+        shortcuts: plain keys type a text label."""
 
         def bind(seq, fn):
             QShortcut(QKeySequence(seq), host, activated=fn)
 
-        for key, _, shortcut in TOOLS:
-            bind(shortcut, lambda k=key: self.select_tool(k))
-        for i, (_, color) in enumerate(PALETTE[:10]):
-            bind(str((i + 1) % 10), lambda c=color: self.select_color(c))
-        bind("Ctrl+Z", self.canvas.undo_stack.undo)
-        bind("Ctrl+Y", self.canvas.undo_stack.redo)
-        bind("Ctrl+Shift+Z", self.canvas.undo_stack.redo)
-        for key in ("[", "-"):
-            bind(key, lambda: self.step_size(-1))
-        for key in ("]", "+"):
-            bind(key, lambda: self.step_size(1))
+        bind("Ctrl+Z", self.canvas.undo)
+        bind("Ctrl+Y", self.canvas.redo)
+        bind("Ctrl+Shift+Z", self.canvas.redo)
 
     def step_size(self, direction):
         value = self.size_slider.value()
@@ -703,6 +911,8 @@ class ToolPanel(QWidget):
 
     def select_color(self, color):
         self.canvas.color = QColor(color)
+        if self.canvas._editing is not None:
+            self.canvas._editing.set_color(color)  # recolour the label being typed
         for swatch in self.swatches:
             if swatch.color == QColor(color):
                 swatch.setChecked(True)
@@ -712,6 +922,8 @@ class ToolPanel(QWidget):
 
     def _size_changed(self, value):
         self.canvas.sizes[self.canvas.tool] = value
+        if self.canvas.tool == "text" and self.canvas._editing is not None:
+            self.canvas._editing.set_pixel_size(value)
         self.size_label.setText(f"{value} px")
         self.canvas.update_cursor()
         self.config["sizes"] = dict(self.canvas.sizes)
@@ -837,6 +1049,7 @@ class EditorWindow(QMainWindow):
         self.activateWindow()
         self.canvas.fit()
         QTimer.singleShot(0, self.canvas.fit)  # again once the layout has settled
+        self.canvas.setFocus()  # so typing goes straight into a label
         self.copy_to_clipboard()
 
     def closeEvent(self, event):

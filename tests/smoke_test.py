@@ -237,6 +237,11 @@ def wobbly_loop(cx, cy, rx, ry, n=48):
     return pts
 
 
+def pen_strokes(canvas):
+    """Only drawn strokes; typing on the PC during a run can add stray text labels."""
+    return [i for i in canvas.strokes() if isinstance(i, StrokeItem)]
+
+
 def test_snapping():
     image = QPixmap(900, 500)
     image.fill(QColor("#ffffff"))
@@ -251,11 +256,11 @@ def test_snapping():
 
     win.select_tool("pen")
     hold_stroke(vp, wobbly_loop(cx, cy, 120, 50), wait_ms=700)
-    item = canvas.strokes()[-1]
+    item = pen_strokes(canvas)[-1]
     check(kinds == ["ellipse"], f"resting at the end of a rough loop snaps it to an ellipse ({kinds})")
     check(item.path().elementCount() < 20, "the snapped stroke is a clean ellipse path, not the freehand points")
     canvas.undo_stack.undo()
-    check(not canvas.strokes(), "a snapped shape undoes in one step")
+    check(not pen_strokes(canvas), "a snapped shape undoes in one step")
 
     kinds.clear()
     hold_stroke(vp, wobbly_loop(cx, cy, 120, 50), wait_ms=0)
@@ -326,7 +331,7 @@ def test_draw_on_screen():
     check(len(canvas.strokes()) == 1, "draw a loop to keep")
 
     clipboard.clear()
-    press_key(overlay, Qt.Key_Return)
+    type_into(overlay.canvas, overlay, key=Qt.Key_Return)  # keys go to the focused canvas
     wait_for(lambda: app.overlay is None)
     image = clipboard.image()
     dpr = QGuiApplication.primaryScreen().devicePixelRatio()
@@ -405,7 +410,7 @@ def test_finish_gestures():
     # Space does the same.
     clipboard.clear()
     overlay = open_selection()
-    press_key(overlay, Qt.Key_Space)
+    type_into(overlay.canvas, overlay, key=Qt.Key_Space)  # keys go to the focused canvas
     wait_for(lambda: app.overlay is None)
     check(app.overlay is None and red_pixels(clipboard.image()) > 20, "Space copies and closes")
 
@@ -428,6 +433,145 @@ def test_finish_gestures():
         check(pasted is not None and abs(pasted.width() - 400 * dpr) <= 2 and red_pixels(pasted) > 20,
               "what gets pasted is the selection with the drawing")
     target.close()
+    app.hotkeys.unregister_all()
+    app.tray.hide()
+
+
+def type_into(canvas, window, text=None, key=None, mods=Qt.NoModifier):
+    """Keys go to the focused canvas, like real typing (after making its window active)."""
+    from klipp.app import force_foreground
+
+    force_foreground(window)
+    wait_for(lambda: QApplication.activeWindow() is window, 1000)
+    canvas.setFocus()
+    if text is not None:
+        QTest.keyClicks(canvas, text)
+    if key is not None:
+        QTest.keyClick(canvas, key, mods)
+    QApplication.processEvents()
+
+
+def point_at(canvas, x, y):
+    move = QMouseEvent(QEvent.MouseMove, QPointF(x, y), canvas.viewport().mapToGlobal(QPointF(x, y)),
+                       Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+    QApplication.sendEvent(canvas.viewport(), move)
+
+
+def labels(canvas):
+    from klipp.editor import TextItem
+
+    return [i for i in canvas.strokes() if isinstance(i, TextItem)]
+
+
+def test_text_labels():
+    from klipp.app import KlippApp
+
+    # --- in the editor window ---------------------------------------------------
+    image = QPixmap(900, 500)
+    image.fill(QColor("#ffffff"))
+    win = EditorWindow(image, 1.5, scratch_config(color="#ff3b30", tool="pen"))
+    win.present()
+    QTest.qWait(200)
+    canvas = win.canvas
+    center = canvas.mapFromScene(canvas.region.center())
+    point_at(canvas, center.x(), center.y())
+    type_into(canvas, win, "fix this")
+    check(canvas._editing is not None and canvas._editing.toPlainText() == "fix this",
+          "typing starts a label at the pointer")
+    check(canvas.tool == "pen", "letters no longer switch tools")
+    type_into(canvas, win, key=Qt.Key_Return, mods=Qt.ShiftModifier)
+    type_into(canvas, win, "please")
+    type_into(canvas, win, key=Qt.Key_Return)
+    check(canvas._editing is None and len(labels(canvas)) == 1, "Enter finishes the label")
+    check(labels(canvas)[0].toPlainText() == "fix this please" or "\n" in labels(canvas)[0].toPlainText()
+          or len(labels(canvas)[0].toPlainText().splitlines()) == 2, "Shift+Enter makes a new line")
+    label = labels(canvas)[0]
+    check(red_pixels(canvas.render_image()) > 30, "the label is in the copied image")
+    canvas.undo()
+    check(not labels(canvas), "Ctrl+Z removes the label")
+    canvas.redo()
+    check(len(labels(canvas)) == 1, "Ctrl+Y brings it back")
+
+    # Click the label to change its words.
+    at = canvas.mapFromScene(label.sceneBoundingRect().center())
+    QTest.mouseClick(canvas.viewport(), Qt.LeftButton, Qt.NoModifier, at)
+    type_into(canvas, win, "!")
+    type_into(canvas, win, key=Qt.Key_Escape)
+    check("!" in label.toPlainText() and canvas._editing is None,
+          "clicking a label edits it where you clicked; Esc finishes")
+    canvas.undo()
+    check("!" not in label.toPlainText(), "the edit undoes on its own")
+
+    # Right-drag erases a label like a stroke.
+    rect = canvas.mapFromScene(label.sceneBoundingRect()).boundingRect()
+    hold_stroke(canvas.viewport(), [(rect.left() - 10, rect.center().y()), (rect.right() + 10, rect.center().y())],
+                button=Qt.RightButton)
+    check(not labels(canvas), "right-drag erases a label")
+    win.close()
+
+    # --- on the frozen screen ---------------------------------------------------
+    config = scratch_config(hotkey_copy="Ctrl+Alt+Shift+F11", hotkey_edit="Ctrl+Alt+Shift+F12",
+                            edit_mode="inplace", color="#ff3b30", tool="pen")
+    app = KlippApp(QApplication.instance(), config)
+    ids = {name: hid for hid, name in app.hotkeys._names.items()}
+    clipboard = QGuiApplication.clipboard()
+
+    def open_selection():
+        ctypes.windll.user32.PostMessageW(app.hotkeys._hwnd, WM_HOTKEY, ids["edit"], 0)
+        wait_for(lambda: app.overlay is not None)
+        ov = app.overlay
+        QTest.mousePress(ov, Qt.LeftButton, Qt.NoModifier, QPoint(300, 250))
+        QTest.mouseMove(ov, QPoint(700, 500))
+        QTest.mouseRelease(ov, Qt.LeftButton, Qt.NoModifier, QPoint(700, 500))
+        QApplication.processEvents()
+        point_at(ov.canvas, 380, 330)
+        return ov
+
+    clipboard.clear()
+    overlay = open_selection()
+    type_into(overlay.canvas, overlay, "look here")
+    type_into(overlay.canvas, overlay, key=Qt.Key_Return)
+    check(app.overlay is not None and len(labels(overlay.canvas)) == 1,
+          "on the frozen screen, Enter finishes the label and stays open")
+    type_into(overlay.canvas, overlay, key=Qt.Key_Space)
+    wait_for(lambda: app.overlay is None)
+    check(app.overlay is None and red_pixels(clipboard.image()) > 30, "then Space copies it, label included")
+
+    overlay = open_selection()
+    type_into(overlay.canvas, overlay, "oops")
+    type_into(overlay.canvas, overlay, key=Qt.Key_Escape)
+    check(app.overlay is not None and len(labels(overlay.canvas)) == 1, "Esc while typing only ends the label")
+    type_into(overlay.canvas, overlay, key=Qt.Key_Escape)
+    wait_for(lambda: app.overlay is None)
+    check(app.overlay is None, "a second Esc cancels")
+
+    target = PasteTarget()
+    target.show()
+    from klipp.app import force_foreground
+    force_foreground(target)
+    target.activateWindow()
+    target.setFocus()
+    wait_for(lambda: ctypes.windll.user32.GetForegroundWindow() == int(target.winId()), 1500)
+    if ctypes.windll.user32.GetForegroundWindow() != int(target.winId()):
+        print("SKIP Ctrl+V while typing: couldn't bring the test window to the front")
+    else:
+        overlay = open_selection()
+        type_into(overlay.canvas, overlay, "why 30s?")
+        type_into(overlay.canvas, overlay, key=Qt.Key_V, mods=Qt.ControlModifier)
+        wait_for(lambda: target.pasted is not None, 2000)
+        check(target.pasted is not None and red_pixels(target.pasted) > 30,
+              "Ctrl+V while typing finishes the label and pastes it where you came from")
+    target.close()
+
+    overlay = open_selection()
+    type_into(overlay.canvas, overlay, "keep me")
+    overlay.toolbar.open_button.click()
+    wait_for(lambda: app.overlay is None and app.windows)
+    editors = list(app.windows)
+    check(len(editors) == 1 and [l.toPlainText() for l in labels(editors[0].canvas)] == ["keep me"],
+          "Open in window carries labels over")
+    for editor in editors:
+        editor.close()
     app.hotkeys.unregister_all()
     app.tray.hide()
 
@@ -527,6 +671,7 @@ if __name__ == "__main__":
     test_snapping()
     test_draw_on_screen()
     test_finish_gestures()
+    test_text_labels()
     test_updates()
     test_hotkey_flow()
     print(f"\n{len(failures)} failure(s)")

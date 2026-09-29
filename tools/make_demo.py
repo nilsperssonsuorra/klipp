@@ -546,27 +546,33 @@ def main():
         frame(("arrow", target), repeat=2)
         return target
 
-    # 2) Circle the call that failed, highlight the error, point at the timeout.
+    # 2) Circle the call that failed, point at the timeout, and just type a note.
     loop = hand_circle(glyphs(5), points=26)
     frame(("cross", end), repeat=3)
     at = move(end, loop[0], 7)
     at = stroke(loop)
     frame(cursor_for(at), repeat=4)
-    at = click(panel.tool_buttons["highlighter"], at)
-    at = click(panel.swatches[2], at, frames=4)  # yellow
-    error = glyphs(8)
-    mark = [(error.left() - 4 + t * (error.width() + 8) / 12, error.center().y()) for t in range(13)]
-    at = move(at, mark[0], 7)
-    at = stroke(mark)
-    frame(cursor_for(at), repeat=3)
     at = click(panel.tool_buttons["arrow"], at)
     timeout = phrase_rect(7, "timeout=30")
     tip = (timeout.right() + 8, timeout.center().y())
     tail = (tip[0] + 150, tip[1] - 34)
-    arrow = [lerp(tail, tip, t / 8) for t in range(9)]
-    at = move(at, arrow[0], 6, kind="cross")
+    at = move(at, tail, 7, kind="cross")
     at = stroke([lerp(tail, tip, t / 14) for t in range(15)])
-    frame(("arrow", at), repeat=5)
+    frame(("cross", at), repeat=4)
+    # Point just left of where the arrow starts and type: the label appears at the pointer.
+    note_at = (tail[0] - 118, tail[1] - 30)
+    at = move(at, note_at, 6, kind="arrow")
+    note = "too low?"
+    label = canvas.start_text(QPointF(note_at[0] * d, note_at[1] * d), note[0])  # scene = screenshot px
+    frame(("arrow", at), repeat=2)
+    for ch in note[1:]:
+        cursor = label.textCursor()
+        cursor.insertText(ch)
+        label.setTextCursor(cursor)
+        frame(("arrow", at), repeat=2)
+    canvas.commit_text()
+    frame(("arrow", at), badge=["Enter"], repeat=4)
+    frame(("arrow", at), repeat=4)
 
     # 3) Ctrl+V: the stopwatch stops, the capture is in the message box.
     frame(("arrow", at), badge=["Ctrl", "V"], repeat=4)

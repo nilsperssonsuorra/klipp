@@ -10,6 +10,7 @@
 
 - **You draw where you captured.** After Alt+Shift+S, your selection stays on the frozen screen with a toolbar under it. There's no editor window to open, arrange or close.
 - **Ctrl+V is the last step.** It unfreezes the screen and pastes your capture, drawing included, into the window you were in. No Copy button, no saving, no file picker.
+- **Just type to add a note.** Point at something and start typing: a label appears right there, as a colored tag that's easy to read, for people and for AI chats alike.
 - **Mistakes are cheap.** Hold the right mouse button and drag to erase whole strokes, whichever tool you're using. Ctrl+Z works too.
 - **Rough is fine.** Pause for a moment at the end of a pen stroke and a wobbly circle, box or line turns into a clean one.
 - **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account and it collects nothing. The only thing it ever contacts is GitHub, once a day, to see whether a new version is out, and you can turn that off in Settings.
@@ -18,7 +19,7 @@
 
 - **Alt+S** freezes the screen so you can drag out an area. The area goes straight to the clipboard.
 - **Alt+Shift+S** freezes the screen, lets you draw on the area you drag out, then copies or pastes it. The keys are listed under [Using it](#using-it).
-- Tools: pen, highlighter, line, arrow, rectangle and ellipse, plus 11 preset colors you pick with one click.
+- Tools: pen, highlighter, line, arrow, rectangle, ellipse and text labels, plus 11 preset colors you pick with one click.
 - One click moves the capture, drawing included, into an editor window when you want to zoom or have more room. There, every change is copied to the clipboard right away.
 - Captures keep full resolution on high-DPI screens. A 4K screen at 150% scaling gives you 4K pixels.
 
@@ -59,18 +60,19 @@ After **Alt+Shift+S**, a toolbar appears under your selection:
 | **Ctrl+V** | Paste the area with your drawing into the window you were in |
 | Space, Enter, Ctrl+C or a click outside the selection | Copy the area with your drawing and close |
 | Ctrl+S | Copy, then save as PNG or JPG |
-| Esc | Cancel |
+| Esc | Cancel (while typing a label, the first Esc just finishes the label) |
 | Window button | Continue in the editor window, drawing included |
 
 Drawing works the same on the frozen screen and in the editor window:
 
 | Input | Action |
 |---|---|
+| **Just start typing** | Write a label where the pointer is, in the current color |
+| Enter or Esc while typing | Finish the label (Shift+Enter starts a new line) |
+| Click a label | Change its words |
 | Left-drag | Draw with the current tool |
-| Right-drag | Erase the strokes you touch |
-| P, H, L, A, R, O, E | Pen, highlighter, line, arrow, rectangle, ellipse, eraser |
-| 1 to 9, 0 | Pick one of the first ten colors |
-| `-` and `+` (or `[` and `]`) | Smaller or bigger brush |
+| Right-drag | Erase the strokes and labels you touch |
+| Toolbar | Pick a tool, a color or the size. Plain keys type text, so there are no single-key shortcuts. |
 | Pause before letting go of a pen stroke | Snap a rough line, circle or box into a clean one |
 | Shift while drawing | Straight lines in 45° steps, perfect squares and circles |
 | Ctrl+Z, Ctrl+Y | Undo, redo |

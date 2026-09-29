@@ -34,6 +34,7 @@ DEFAULTS = {
         "rect": 6,
         "ellipse": 6,
         "eraser": 24,
+        "text": 30,  # label text height, in screenshot pixels
     },
 }
 

@@ -76,6 +76,9 @@ def tool_icon(kind):
         p.drawRoundedRect(QRectF(10, 10, 44, 44), 5, 5)
         p.drawRect(QRectF(20, 10, 22, 14))
         p.drawRoundedRect(QRectF(18, 34, 28, 20), 2, 2)
+    elif kind == "text":
+        p.drawLine(QPointF(14, 14), QPointF(50, 14))
+        p.drawLine(QPointF(32, 14), QPointF(32, 52))
     elif kind == "done":
         p.setPen(_pen(6))
         p.drawPolyline(QPolygonF([QPointF(14, 33), QPointF(27, 46), QPointF(50, 19)]))
