@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QCursor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QWidget
 
 from . import autostart, icons
+from .capture import grab_screen
 from .config import CONFIG_DIR, SETTINGS_KEYS, Config
 from .editor import EditorWindow, save_image_dialog
 from .hotkeys import HotkeyWindow
@@ -199,7 +200,7 @@ class KlippApp(QObject):
             return
         self._previous_window = ctypes.windll.user32.GetForegroundWindow()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
-        shot = screen.grabWindow(0)
+        shot = grab_screen(screen)
         dpr = shot.devicePixelRatio()
         draw_here = mode == "edit" and self.config["edit_mode"] != "window"
         self.overlay = SelectionOverlay(screen, shot, self.config["dim"], self.config["crosshair"],

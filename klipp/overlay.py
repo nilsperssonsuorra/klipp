@@ -13,6 +13,7 @@ from .editor import Canvas, ToolPanel, icon_button, separator
 from .theme import stylesheet
 
 ACCENT = QColor("#2f9bff")
+CROSSHAIR_GAP = 14  # the guide lines stop this far from the pointer, so only the real pointer forms a "+"
 LABEL_FONT = QFont("Segoe UI", 9)
 
 
@@ -78,10 +79,9 @@ class SelectionOverlay(QWidget):
         self.canvas = None
         self.toolbar = None
         self._dpr = shot.devicePixelRatio()
-        self._dimmed = QPixmap(shot)
-        painter = QPainter(self._dimmed)
-        painter.fillRect(self._dimmed.rect(), QColor(0, 0, 0, round(255 * dim / 100)))
-        painter.end()
+        # Darkening is painted per update rather than baked into a copy of the whole screenshot:
+        # copying and filling a 4K image up front delayed the frozen screen by 20-35 ms.
+        self._dim = QColor(0, 0, 0, round(255 * dim / 100))
 
         self._metrics = QFontMetrics(LABEL_FONT)
         self._anchor = None  # drag start, logical coords
@@ -142,7 +142,8 @@ class SelectionOverlay(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.drawPixmap(0, 0, self._dimmed)
+        p.drawPixmap(0, 0, self._shot)
+        p.fillRect(event.rect(), self._dim)
         sel = self._selection()
         if sel is not None and not sel.isEmpty():
             target = self._to_logical(sel)
@@ -160,11 +161,14 @@ class SelectionOverlay(QWidget):
             p.setPen(QColor("#ffffff"))
             p.drawText(label, Qt.AlignCenter, text)
         elif self._anchor is None and self._cursor is not None and self._crosshair:
-            # Faint crosshair guides before the drag starts.
+            # Faint guide lines before the drag starts. They stop short of the pointer: a painted
+            # crossing would trail the real (instant) pointer while moving and look like a second "+".
             p.setPen(QPen(QColor(255, 255, 255, 90), 1))
-            c = self._cursor
-            p.drawLine(QPointF(0, c.y()), QPointF(self.width(), c.y()))
-            p.drawLine(QPointF(c.x(), 0), QPointF(c.x(), self.height()))
+            x, y, gap = self._cursor.x(), self._cursor.y(), CROSSHAIR_GAP
+            p.drawLine(QPointF(0, y), QPointF(x - gap, y))
+            p.drawLine(QPointF(x + gap, y), QPointF(self.width(), y))
+            p.drawLine(QPointF(x, 0), QPointF(x, y - gap))
+            p.drawLine(QPointF(x, y + gap), QPointF(x, self.height()))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
