@@ -2,9 +2,10 @@
 and then (for capture-and-edit) draws on it right there."""
 
 import ctypes
+import math
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QRegion, QShortcut
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QWidget
 
 from . import icons
@@ -86,7 +87,8 @@ class SelectionOverlay(QWidget):
         self._metrics = QFontMetrics(LABEL_FONT)
         self._anchor = None  # drag start, logical coords
         self._cursor = QPointF(self.mapFromGlobal(QCursor.pos()))  # crosshair shows right away
-        self._dirty = QRegion()
+        self._shown_selection = None  # the selection as last painted, see _refresh()
+        self._guides_at = None  # where the guide lines were last painted, so they can be erased
 
     # --- geometry helpers -------------------------------------------------
 
@@ -100,6 +102,13 @@ class SelectionOverlay(QWidget):
         left, top = round(x0 * d), round(y0 * d)
         right, bottom = round(x1 * d), round(y1 * d)
         return QRect(left, top, max(right - left, 0), max(bottom - top, 0)).intersected(self._shot.rect())
+
+    def _covering_pixels(self, rect):
+        """The screenshot pixels (physical) that cover a logical rectangle."""
+        d = self._dpr
+        x0, y0 = math.floor(rect.left() * d), math.floor(rect.top() * d)
+        x1, y1 = math.ceil(rect.right() * d), math.ceil(rect.bottom() * d)
+        return QRect(x0, y0, x1 - x0, y1 - y0).intersected(self._shot.rect())
 
     def _to_logical(self, phys):
         d = self._dpr
@@ -120,34 +129,57 @@ class SelectionOverlay(QWidget):
         sel = self._selection()
         return f"{sel.width()} × {sel.height()}" if sel else ""
 
-    def _current_dirty(self):
-        region = QRegion()
+    def _selection_state(self):
+        """What the selection looks like now: its outline and size label, in logical px."""
         sel = self._selection()
-        if sel is not None:
-            r = self._to_logical(sel).toAlignedRect().adjusted(-4, -4, 4, 4)
-            region += r
-            region += self._label_rect(self._to_logical(sel)).toAlignedRect().adjusted(-2, -2, 2, 2)
-        elif self._cursor is not None and self._crosshair:
-            c = self._cursor.toPoint()
-            region += QRect(0, c.y() - 2, self.width(), 5)
-            region += QRect(c.x() - 2, 0, 5, self.height())
-        return region
+        if sel is None:
+            return None
+        rect = self._to_logical(sel)
+        return rect, self._label_rect(rect)
 
     def _refresh(self):
-        new_dirty = self._current_dirty()
-        self.update(self._dirty.united(new_dirty))
-        self._dirty = new_dirty
+        """Repaint what the selection change touched, as a few separate thin pieces.
+
+        Qt hands Windows the bounding box of one update, so repainting a growing selection in
+        one go redraws the whole selection area on every mouse move. Only the edges that moved
+        (and the size label) actually change."""
+        old, new = self._shown_selection, self._selection_state()
+        self._shown_selection = new
+        pieces = []
+        if old is not None and new is not None:
+            (a, label_a), (b, label_b) = old, new
+            span = a.united(b).toAlignedRect().adjusted(-3, -3, 3, 3)
+            for u, v in ((a.left(), b.left()), (a.right(), b.right())):
+                if u != v:
+                    pieces.append(QRect(math.floor(min(u, v)) - 3, span.top(), math.ceil(abs(u - v)) + 7, span.height()))
+            for u, v in ((a.top(), b.top()), (a.bottom(), b.bottom())):
+                if u != v:
+                    pieces.append(QRect(span.left(), math.floor(min(u, v)) - 3, span.width(), math.ceil(abs(u - v)) + 7))
+            pieces += [label_a.toAlignedRect().adjusted(-2, -2, 2, 2), label_b.toAlignedRect().adjusted(-2, -2, 2, 2)]
+        else:
+            for state in (old, new):
+                if state is not None:
+                    rect, label = state
+                    pieces += [rect.toAlignedRect().adjusted(-3, -3, 3, 3), label.toAlignedRect().adjusted(-2, -2, 2, 2)]
+        for piece in pieces:
+            self.repaint(piece)
 
     # --- events -----------------------------------------------------------
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.drawPixmap(0, 0, self._shot)
-        p.fillRect(event.rect(), self._dim)
+        # Only copy the part of the screenshot this paint covers (letting the clip discard the
+        # rest of a 4K image made every partial repaint cost as much as a full one), snapped to
+        # whole screenshot pixels so it's copied 1:1 and never resampled half a pixel off.
+        area = self._covering_pixels(QRectF(event.rect()))
+        p.drawPixmap(self._to_logical(area), self._shot, QRectF(area))
+        p.fillRect(self._to_logical(area), self._dim)
         sel = self._selection()
         if sel is not None and not sel.isEmpty():
             target = self._to_logical(sel)
-            p.drawPixmap(target, self._shot, QRectF(sel))
+            bright = sel.intersected(area)
+            if not bright.isEmpty():
+                p.drawPixmap(self._to_logical(bright), self._shot, QRectF(bright))
             p.setPen(QPen(ACCENT, 1))
             p.drawRect(target.adjusted(-0.5, -0.5, 0.5, 0.5))
 
@@ -160,31 +192,65 @@ class SelectionOverlay(QWidget):
             p.drawRoundedRect(label, 4, 4)
             p.setPen(QColor("#ffffff"))
             p.drawText(label, Qt.AlignCenter, text)
-        elif self._anchor is None and self._cursor is not None and self._crosshair:
-            # Faint guide lines before the drag starts. They stop short of the pointer: a painted
-            # crossing would trail the real (instant) pointer while moving and look like a second "+".
-            p.setPen(QPen(QColor(255, 255, 255, 90), 1))
-            x, y, gap = self._cursor.x(), self._cursor.y(), CROSSHAIR_GAP
-            p.drawLine(QPointF(0, y), QPointF(x - gap, y))
-            p.drawLine(QPointF(x + gap, y), QPointF(self.width(), y))
-            p.drawLine(QPointF(x, 0), QPointF(x, y - gap))
-            p.drawLine(QPointF(x, y + gap), QPointF(x, self.height()))
+        elif self._guides_visible():
+            self._paint_guides(p)
+
+    # --- crosshair guides -------------------------------------------------
+
+    def _guides_visible(self):
+        return self._crosshair and self._anchor is None and self.canvas is None and self._cursor is not None
+
+    def _paint_guides(self, p):
+        """Faint guide lines through the pointer while choosing where to start. They stop
+        short of the pointer so the real pointer is the only "+"."""
+        p.setPen(QPen(QColor(255, 255, 255, 90), 1))
+        x, y, gap = round(self._cursor.x()), round(self._cursor.y()), CROSSHAIR_GAP
+        p.drawLine(QPointF(0, y), QPointF(x - gap, y))
+        p.drawLine(QPointF(x + gap, y), QPointF(self.width(), y))
+        p.drawLine(QPointF(x, 0), QPointF(x, y - gap))
+        p.drawLine(QPointF(x, y + gap), QPointF(x, self.height()))
+        self._guides_at = (x, y)
+
+    def _move_guides(self):
+        """Redraw only the thin strips the guide lines leave and enter, each one on its own.
+
+        Qt hands Windows the bounding box of everything that changed in one update, and two
+        full-length lines span the whole screen: that was a full 4K redraw (~8 ms) per mouse
+        move. Four separate strip repaints are a fraction of a millisecond each."""
+        old, self._guides_at = self._guides_at, None
+        new = (round(self._cursor.x()), round(self._cursor.y())) if self._guides_visible() else None
+        rows = [pos[1] for pos in (old, new) if pos is not None]
+        cols = [pos[0] for pos in (old, new) if pos is not None]
+        strips = []
+        for values, make in ((rows, lambda lo, hi: QRect(0, lo - 1, self.width(), hi - lo + 3)),
+                             (cols, lambda lo, hi: QRect(lo - 1, 0, hi - lo + 3, self.height()))):
+            if len(values) == 2 and abs(values[0] - values[1]) <= 24:
+                strips.append(make(min(values), max(values)))  # close together: one strip
+            else:
+                strips += [make(v, v) for v in values]
+        for strip in strips:
+            self.repaint(strip)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._anchor = event.position()
             self._cursor = event.position()
+            self._move_guides()  # erases them: they're hidden while dragging
             self._refresh()
         elif event.button() == Qt.RightButton:
             if self._anchor is not None:
                 self._anchor = None
                 self._refresh()
+                self._move_guides()
             else:
                 self.close()
 
     def mouseMoveEvent(self, event):
         self._cursor = event.position()
-        self._refresh()
+        if self._anchor is None:
+            self._move_guides()
+        else:
+            self._refresh()
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or self._anchor is None:
@@ -195,6 +261,7 @@ class SelectionOverlay(QWidget):
             # Treat a plain click as a mis-click; let them drag again.
             self._anchor = None
             self._refresh()
+            self._move_guides()
             return
         if self._draw_config is not None:
             self._start_drawing(sel)
