@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -38,7 +38,6 @@ from PySide6.QtWidgets import QApplication
 
 from klipp import hotkeys, icons
 from klipp.config import DEFAULTS, Config
-from klipp.app import Toast
 from klipp.overlay import SelectionOverlay
 from klipp.settings import SettingsDialog
 
@@ -439,7 +438,7 @@ def main():
     app.setApplicationName("Klipp")
     d = QGuiApplication.primaryScreen().devicePixelRatio()
     DOCS.mkdir(exist_ok=True)
-    desktop = paint_desktop(d)
+    desktop = paint_desktop(d, composer={"focused": True})
     rec = Recorder(d)
 
     # 1) Alt+Shift+S and drag over the error. The frozen screen stays up for drawing.
@@ -452,7 +451,7 @@ def main():
     overlay.annotated.connect(lambda image, rect, action: result.update(image=image, rect=rect))
     start = (TERMINAL.left() + 4, LINE_RECTS[3].top() - 8)
     end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 21)
-    select_area(rec, overlay, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
+    select_area(rec, overlay, desktop, ["Alt", "Shift", "S"], start, end, cursor=(720, 470))
     canvas = overlay.canvas
     vp = canvas.viewport()  # covers the whole overlay, so its coordinates are frame coordinates
 
@@ -508,15 +507,9 @@ def main():
     at = stroke(right, snap_caption="Pause, and it snaps into shape")
     frame(("arrow", at), repeat=6)
 
-    # 3) Enter copies it and the frozen screen goes away.
-    frame(("arrow", at), badge=["Enter"], repeat=8)
-    overlay._done("copy")
-    toast = Toast("✓ Copied to clipboard", QPoint(result["rect"].center().x(), result["rect"].bottom()))
-    off_screen(toast)
-    for i in range(14):
-        rec.frame([(desktop, (0, 0)), (toast.grab(), (toast.x(), toast.y()))], ("arrow", at))
-
-    # 4) Paste into the chat and send.
+    # 3) Ctrl+V: the frozen screen goes away and the capture lands in the chat you were typing in.
+    frame(("arrow", at), badge=["Ctrl", "V"], repeat=8)
+    overlay._done("paste")
     posted = QPixmap.fromImage(result["image"])
     posted.setDevicePixelRatio(d)
 
@@ -524,19 +517,14 @@ def main():
         rec.frame([(paint_desktop(d, composer.pop("posted", None), composer), (0, 0))],
                   cursor, badge=badge, caption=caption, repeat=repeat)
 
-    target = (CHAT_INPUT.right() - 50, CHAT_INPUT.center().y())  # clear of the text being typed
-    for i in range(12):
-        chat(cursor=("arrow", lerp(at, target, (i + 1) / 12)))
-    chat(4, ("ibeam", target))
-    chat(6, ("ibeam", target), focused=True)                                      # clicked: the box has focus
-    chat(6, ("ibeam", target), badge=["Ctrl", "V"], focused=True)
-    chat(8, ("ibeam", target), badge=["Ctrl", "V"], focused=True, attachment=posted)  # pasted as an attachment
+    chat(8, ("arrow", at), badge=["Ctrl", "V"], focused=True, attachment=posted)
+    chat(10, ("arrow", at), caption="Pasted where you were typing", focused=True, attachment=posted)
     message = "getting this, any idea?"
     for n in range(2, len(message) + 2, 2):
-        chat(1, ("ibeam", target), focused=True, attachment=posted, text=message[:n])
-    chat(6, ("ibeam", target), focused=True, attachment=posted, text=message)
-    chat(6, ("ibeam", target), badge=["Enter"], focused=True, attachment=posted, text=message)
-    chat(50, ("ibeam", target), caption="Sent. No saving, no file picker.", focused=True, posted=posted)
+        chat(1, ("arrow", at), focused=True, attachment=posted, text=message[:n])
+    chat(6, ("arrow", at), focused=True, attachment=posted, text=message)
+    chat(6, ("arrow", at), badge=["Enter"], focused=True, attachment=posted, text=message)
+    chat(50, ("arrow", at), caption="Sent. No saving, no file picker.", focused=True, posted=posted)
 
     # --- encode ------------------------------------------------------------------
     tmp = Path(tempfile.mkdtemp(prefix="klipp-demo-"))

@@ -86,6 +86,7 @@ class KlippApp(QObject):
         self.settings_dialog = None
         self._toast = None
         self._previous_window = None  # window to hand focus back to after a copy capture
+        self._paste_into = None  # window to paste into once the frozen screen has gone
 
         self.hotkeys = HotkeyWindow()
         self.hotkeys.triggered.connect(self.capture)
@@ -219,6 +220,9 @@ class KlippApp(QObject):
         if self._previous_window and user32.IsWindow(self._previous_window):
             user32.SetForegroundWindow(self._previous_window)
         self._previous_window = None
+        if self._paste_into:
+            target, self._paste_into = self._paste_into, None
+            QTimer.singleShot(120, lambda: send_paste(target))
 
     def _auto_save(self, image):
         folder = self.config.save_dir()
@@ -247,6 +251,9 @@ class KlippApp(QObject):
         if self.config["auto_save"]:
             self._auto_save(image)
         QGuiApplication.clipboard().setImage(image)
+        if action == "paste" and can_paste_into(self._previous_window):
+            self._paste_into = self._previous_window  # pasted once focus is back there
+            return
         if action == "save":
             # Keep focus with Klipp and open the dialog once the overlay is gone, so it isn't hidden.
             self._previous_window = None
@@ -262,6 +269,32 @@ class KlippApp(QObject):
         window.destroyed.connect(lambda: self.windows.discard(window))
         window.present(rect)
         force_foreground(window)
+
+
+NOT_PASTE_TARGETS = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}  # desktop, taskbar
+
+
+def can_paste_into(hwnd):
+    if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
+        return False
+    name = ctypes.create_unicode_buffer(64)
+    ctypes.windll.user32.GetClassNameW(hwnd, name, 64)
+    return name.value not in NOT_PASTE_TARGETS
+
+
+def send_paste(hwnd):
+    """Press Ctrl+V for the user, but only if `hwnd` really is the window in front."""
+    user32 = ctypes.windll.user32
+    if user32.GetForegroundWindow() != hwnd:
+        return
+    VK_CONTROL, VK_V, KEYUP = 0x11, 0x56, 0x0002
+    ctrl_held = user32.GetAsyncKeyState(VK_CONTROL) & 0x8000  # the user may still be holding it
+    if not ctrl_held:
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+    user32.keybd_event(VK_V, 0, 0, 0)
+    user32.keybd_event(VK_V, 0, KEYUP, 0)
+    if not ctrl_held:
+        user32.keybd_event(VK_CONTROL, 0, KEYUP, 0)
 
 
 def force_foreground(widget):

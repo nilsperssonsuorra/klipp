@@ -15,9 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 import klipp.config as config_module
 from klipp.config import DEFAULTS, Config
@@ -346,6 +346,75 @@ def test_draw_on_screen():
     app.tray.hide()
 
 
+class PasteTarget(QWidget):
+    """A stand-in for the chat you came from: records what Ctrl+V pastes into it."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Klipp test: paste target")
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.resize(300, 200)
+        self.pasted = None
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Paste):
+            self.pasted = QGuiApplication.clipboard().image()
+
+
+def test_finish_gestures():
+    from klipp.app import KlippApp, force_foreground
+
+    config = scratch_config(hotkey_copy="Ctrl+Alt+Shift+F11", hotkey_edit="Ctrl+Alt+Shift+F12", edit_mode="inplace")
+    app = KlippApp(QApplication.instance(), config)
+    ids = {name: hid for hid, name in app.hotkeys._names.items()}
+    user32 = ctypes.windll.user32
+    clipboard = QGuiApplication.clipboard()
+
+    def open_selection():
+        user32.PostMessageW(app.hotkeys._hwnd, WM_HOTKEY, ids["edit"], 0)
+        wait_for(lambda: app.overlay is not None)
+        ov = app.overlay
+        QTest.mousePress(ov, Qt.LeftButton, Qt.NoModifier, QPoint(300, 250))
+        QTest.mouseMove(ov, QPoint(700, 500))
+        QTest.mouseRelease(ov, Qt.LeftButton, Qt.NoModifier, QPoint(700, 500))
+        QApplication.processEvents()
+        hold_stroke(ov.canvas.viewport(), [(350, 300), (420, 330), (500, 310), (600, 360)])
+        return ov
+
+    # A plain click outside the selection copies and closes.
+    clipboard.clear()
+    overlay = open_selection()
+    vp = overlay.canvas.viewport()
+    QApplication.sendEvent(vp, QMouseEvent(QEvent.MouseMove, QPointF(150, 150), vp.mapToGlobal(QPointF(150, 150)),
+                                         Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+    check(vp.cursor().shape() == Qt.ArrowCursor, "the pointer turns into an arrow outside the selection")
+    QTest.mouseClick(vp, Qt.LeftButton, Qt.NoModifier, QPoint(150, 150))
+    wait_for(lambda: app.overlay is None)
+    check(app.overlay is None and red_pixels(clipboard.image()) > 20, "clicking outside the selection copies and closes")
+
+    # Ctrl+V: copy, close, and paste into the window you came from.
+    target = PasteTarget()
+    target.show()
+    force_foreground(target)
+    target.activateWindow()
+    target.setFocus()
+    wait_for(lambda: user32.GetForegroundWindow() == int(target.winId()), 1500)
+    if user32.GetForegroundWindow() != int(target.winId()):
+        print("SKIP Ctrl+V paste test: couldn't bring the test window to the front")
+    else:
+        overlay = open_selection()
+        QTest.keyClick(overlay, Qt.Key_V, Qt.ControlModifier)
+        wait_for(lambda: target.pasted is not None, 2000)
+        pasted = target.pasted
+        dpr = QGuiApplication.primaryScreen().devicePixelRatio()
+        check(app.overlay is None and pasted is not None, "Ctrl+V closes the frozen screen and pastes where you came from")
+        check(pasted is not None and abs(pasted.width() - 400 * dpr) <= 2 and red_pixels(pasted) > 20,
+              "what gets pasted is the selection with the drawing")
+    target.close()
+    app.hotkeys.unregister_all()
+    app.tray.hide()
+
+
 def test_hotkey_flow():
     from klipp.app import KlippApp
 
@@ -397,6 +466,7 @@ if __name__ == "__main__":
     test_settings()
     test_snapping()
     test_draw_on_screen()
+    test_finish_gestures()
     test_hotkey_flow()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

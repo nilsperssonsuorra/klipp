@@ -236,6 +236,7 @@ class Canvas(QGraphicsView):
 
     zoomChanged = Signal(float)
     snapped = Signal(str)  # a rough stroke was turned into this shape
+    finishRequested = Signal()  # embedded: the user clicked outside the selection
 
     def __init__(self, pixmap, dpr, parent=None, region=None, embedded=False, dim=45):
         super().__init__(parent)
@@ -266,6 +267,7 @@ class Canvas(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
         self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)  # moves without a button held, for the cursor
         if embedded:
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -285,6 +287,8 @@ class Canvas(QGraphicsView):
         self._erased = []
         self._snapped = False
         self._snap_timer = QTimer(self, singleShot=True, interval=SNAP_DELAY_MS, timeout=self._try_snap)
+        self._inside = True  # embedded: is the pointer over the selection?
+        self._press = None  # embedded: where a left press outside the selection began
 
     # zoom ------------------------------------------------------------------
 
@@ -341,7 +345,9 @@ class Canvas(QGraphicsView):
 
     def update_cursor(self, tool=None):
         tool = tool or self.tool
-        if tool in FREEHAND or tool == "eraser":
+        if self.embedded and not self._inside and self._mode is None:
+            self.viewport().setCursor(Qt.ArrowCursor)  # clicking out here finishes
+        elif tool in FREEHAND or tool == "eraser":
             self.viewport().setCursor(circle_cursor(self.size_for(tool) * self.zoom, self.dpr))
         else:
             self.viewport().setCursor(Qt.CrossCursor)
@@ -367,7 +373,10 @@ class Canvas(QGraphicsView):
         button = event.button()
         pos = self._scene_pos(event)
         self._button = button
-        if button == Qt.MiddleButton and not self.embedded:
+        if button == Qt.LeftButton and self.embedded and not self.region.contains(pos):
+            self._mode = "outside"  # a click (not a drag) out here finishes, see _finish()
+            self._press = event.position()
+        elif button == Qt.MiddleButton and not self.embedded:
             self._mode = "pan"
             self._last = event.position()
             self.viewport().setCursor(Qt.ClosedHandCursor)
@@ -377,8 +386,7 @@ class Canvas(QGraphicsView):
             self._last = pos
             self.update_cursor("eraser")
             self._erase_along(pos, pos)
-        # On the frozen screen, clicks outside the selection don't start a stroke.
-        elif button == Qt.LeftButton and (not self.embedded or self.region.contains(pos)):
+        elif button == Qt.LeftButton:
             self._mode = "draw"
             self._draw_tool = self.tool
             self._start = pos
@@ -395,7 +403,15 @@ class Canvas(QGraphicsView):
             # The release went missing (e.g. focus was stolen mid-drag); don't get stuck.
             self._finish()
             return
-        if self._mode == "pan":
+        if self.embedded and self._mode is None:
+            inside = self.region.contains(self._scene_pos(event))
+            if inside != self._inside:
+                self._inside = inside
+                self.update_cursor()
+        if self._mode == "outside":
+            if (event.position() - self._press).manhattanLength() > 6:
+                self._mode = "outside-drag"  # became a drag: not a finishing click
+        elif self._mode == "pan":
             delta = event.position() - self._last
             self._last = event.position()
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - round(delta.x()))
@@ -414,6 +430,9 @@ class Canvas(QGraphicsView):
     def _finish(self):
         mode, self._mode = self._mode, None
         self._snap_timer.stop()
+        if mode == "outside":
+            self.finishRequested.emit()
+            return
         if mode == "draw":
             bounds = self._item.path().boundingRect()
             if self._draw_tool not in FREEHAND and max(bounds.width(), bounds.height()) < 2:

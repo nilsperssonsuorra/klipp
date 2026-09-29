@@ -46,7 +46,9 @@ class FloatingToolbar(QFrame):
         self.open_button = icon_button(icons.tool_icon("expand"), "Open in the editor window (zoom, more room)")
         self.save_button = icon_button(icons.tool_icon("save"), "Save as (Ctrl+S)")
         self.cancel_button = icon_button(icons.tool_icon("close"), "Cancel (Esc)")
-        self.done_button = icon_button(icons.tool_icon("done"), "Copy and close (Enter)")
+        self.done_button = icon_button(icons.tool_icon("done"),
+                                       "Copy and close (Enter, or click outside the selection).\n"
+                                       "Ctrl+V pastes it straight into the window you came from.")
         self.done_button.setStyleSheet("QToolButton { background: #2f7bff; } QToolButton:hover { background: #4a8cff; }")
         for button in (self.open_button, self.save_button, self.cancel_button, self.done_button):
             row.addWidget(button)
@@ -56,7 +58,7 @@ class FloatingToolbar(QFrame):
 
 class SelectionOverlay(QWidget):
     selected = Signal(QPixmap, QRect)  # cropped image, selection in global logical coords
-    annotated = Signal(QImage, QRect, str)  # drawn-on capture, selection, and "copy" or "save"
+    annotated = Signal(QImage, QRect, str)  # drawn-on capture, selection, and "copy", "save" or "paste"
     open_editor = Signal(QPixmap, list, QRect)  # capture and strokes, to continue in the editor window
     finished = Signal()
 
@@ -216,10 +218,13 @@ class SelectionOverlay(QWidget):
         self.toolbar.save_button.clicked.connect(lambda: self._done("save"))
         self.toolbar.cancel_button.clicked.connect(self.close)
         self.toolbar.done_button.clicked.connect(lambda: self._done("copy"))
+        self.canvas.finishRequested.connect(lambda: self._done("copy"))
         self.toolbar.panel.install_shortcuts(self)
         for key in ("Return", "Enter", "Ctrl+C"):
             QShortcut(QKeySequence(key), self, activated=lambda: self._done("copy"))
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: self._done("save"))
+        # The paste you were about to do anyway: copy, close, and paste where you came from.
+        QShortcut(QKeySequence("Ctrl+V"), self, activated=lambda: self._done("paste"))
         self._place_toolbar()
         self.canvas.show()
         self.toolbar.show()

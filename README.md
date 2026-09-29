@@ -1,6 +1,6 @@
 # Klipp
 
-**Alt+Shift+S, drag, draw, Enter, Ctrl+V.** Screenshots on Windows that you draw on right where they are, without opening an app or saving a file.
+**Alt+Shift+S, drag, draw, Ctrl+V.** Screenshots on Windows that you draw on right where they are, then paste, without opening an app or saving a file.
 
 ![Klipp demo](docs/demo.gif)
 
@@ -9,7 +9,7 @@
 ## What it does
 
 - **Alt+S** freezes the screen so you can drag out an area. The area goes straight to the clipboard.
-- **Alt+Shift+S** freezes the screen too, but after you drag out an area you draw on it right there, on the frozen screen. There's no editor window to wait for. Press **Enter** and the area, drawing included, is on your clipboard.
+- **Alt+Shift+S** freezes the screen too, but after you drag out an area you draw on it right there, on the frozen screen. There's no editor window to wait for. When you're done, just press **Ctrl+V**: the screen unfreezes and your capture, drawing included, is pasted into the window you were in. Or click anywhere outside the selection to copy it and paste it somewhere else yourself.
 - **Rough shapes snap into clean ones.** Draw a wobbly circle, box or line with the pen and pause for a moment before letting go. It turns into a clean ellipse, rectangle or straight line.
 - Tools: pen, highlighter, line, arrow, rectangle and ellipse, plus 11 preset colors you pick with one click.
 - Holding the right mouse button and dragging erases every stroke you touch. It removes whole strokes, the way Snipping Tool does, and works whichever tool is selected.
@@ -50,7 +50,8 @@ After **Alt+Shift+S**, a toolbar appears under your selection:
 
 | Input | Action |
 |---|---|
-| **Enter** or Ctrl+C | Copy the area with your drawing and close |
+| **Ctrl+V** | Paste the area with your drawing into the window you were in |
+| Click outside the selection, Enter or Ctrl+C | Copy the area with your drawing and close |
 | Ctrl+S | Copy, then save as PNG or JPG |
 | Esc | Cancel |
 | Window button | Continue in the editor window, drawing included |
