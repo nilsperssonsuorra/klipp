@@ -6,14 +6,20 @@
 
 **[Download Klipp for Windows](https://github.com/nilsperssonsuorra/klipp/releases/latest)**. Unzip it and run `Klipp.exe`. No installer, no account.
 
+## Why Klipp?
+
+- **You draw where you captured.** After Alt+Shift+S, your selection stays on the frozen screen with a toolbar under it. There's no editor window to open, arrange or close.
+- **Ctrl+V is the last step.** It unfreezes the screen and pastes your capture, drawing included, into the window you were in. No Copy button, no saving, no file picker.
+- **Mistakes are cheap.** Hold the right mouse button and drag to erase whole strokes, whichever tool you're using. Ctrl+Z works too.
+- **Rough is fine.** Pause for a moment at the end of a pen stroke and a wobbly circle, box or line turns into a clean one.
+- **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account, it never connects to the internet, and it collects nothing.
+
 ## What it does
 
 - **Alt+S** freezes the screen so you can drag out an area. The area goes straight to the clipboard.
-- **Alt+Shift+S** freezes the screen too, but after you drag out an area you draw on it right there, on the frozen screen. There's no editor window to wait for. When you're done, just press **Ctrl+V**: the screen unfreezes and your capture, drawing included, is pasted into the window you were in. Or click anywhere outside the selection to copy it and paste it somewhere else yourself.
-- **Rough shapes snap into clean ones.** Draw a wobbly circle, box or line with the pen and pause for a moment before letting go. It turns into a clean ellipse, rectangle or straight line.
+- **Alt+Shift+S** freezes the screen, lets you draw on the area you drag out, then copies or pastes it. The keys are listed under [Using it](#using-it).
 - Tools: pen, highlighter, line, arrow, rectangle and ellipse, plus 11 preset colors you pick with one click.
-- Holding the right mouse button and dragging erases every stroke you touch. It removes whole strokes, the way Snipping Tool does, and works whichever tool is selected.
-- Need more room or zoom? One click moves the capture, drawing and all, into an editor window. There, every change is copied to the clipboard right away.
+- One click moves the capture, drawing included, into an editor window when you want to zoom or have more room. There, every change is copied to the clipboard right away.
 - Captures keep full resolution on high-DPI screens. A 4K screen at 150% scaling gives you 4K pixels.
 
 Klipp runs in the system tray. To have it start with Windows, turn that on in Settings.
