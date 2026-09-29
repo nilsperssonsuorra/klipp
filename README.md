@@ -1,6 +1,6 @@
 # Klipp
 
-**Alt+Shift+S, drag, draw, Ctrl+V.** Screenshots on Windows without opening an app or saving a file.
+**Alt+Shift+S, drag, draw, Enter, Ctrl+V.** Screenshots on Windows that you draw on right where they are, without opening an app or saving a file.
 
 ![Klipp demo](docs/demo.gif)
 
@@ -9,10 +9,11 @@
 ## What it does
 
 - **Alt+S** freezes the screen so you can drag out an area. The area goes straight to the clipboard.
-- **Alt+Shift+S** does the same, then opens the area in the editor.
-- The editor has a pen, highlighter, line, arrow, rectangle and ellipse, plus 11 preset colors you pick with one click.
+- **Alt+Shift+S** freezes the screen too, but after you drag out an area you draw on it right there, on the frozen screen. There's no editor window to wait for. Press **Enter** and the area, drawing included, is on your clipboard.
+- **Rough shapes snap into clean ones.** Draw a wobbly circle, box or line with the pen and pause for a moment before letting go. It turns into a clean ellipse, rectangle or straight line.
+- Tools: pen, highlighter, line, arrow, rectangle and ellipse, plus 11 preset colors you pick with one click.
 - Holding the right mouse button and dragging erases every stroke you touch. It removes whole strokes, the way Snipping Tool does, and works whichever tool is selected.
-- Every change in the editor is copied to the clipboard right away, so you can paste at any point without pressing Copy.
+- Need more room or zoom? One click moves the capture, drawing and all, into an editor window. There, every change is copied to the clipboard right away.
 - Captures keep full resolution on high-DPI screens. A 4K screen at 150% scaling gives you 4K pixels.
 
 Klipp runs in the system tray and starts with Windows. You can turn that off in Settings.
@@ -45,7 +46,16 @@ This creates `dist\Klipp\Klipp.exe` and a release zip in `dist`.
 
 While selecting an area, press **Esc** or right-click to cancel.
 
-In the editor:
+After **Alt+Shift+S**, a toolbar appears under your selection:
+
+| Input | Action |
+|---|---|
+| **Enter** or Ctrl+C | Copy the area with your drawing and close |
+| Ctrl+S | Copy, then save as PNG or JPG |
+| Esc | Cancel |
+| Window button | Continue in the editor window, drawing included |
+
+Drawing works the same on the frozen screen and in the editor window:
 
 | Input | Action |
 |---|---|
@@ -54,11 +64,12 @@ In the editor:
 | P, H, L, A, R, O, E | Pen, highlighter, line, arrow, rectangle, ellipse, eraser |
 | 1 to 9, 0 | Pick one of the first ten colors |
 | `-` and `+` (or `[` and `]`) | Smaller or bigger brush |
+| Pause before letting go of a pen stroke | Snap a rough line, circle or box into a clean one |
 | Shift while drawing | Straight lines in 45° steps, perfect squares and circles |
 | Ctrl+Z, Ctrl+Y | Undo, redo |
 | Ctrl+S | Save as PNG or JPG |
-| Ctrl+scroll, Ctrl+0, Ctrl+1 | Zoom, fit to window, actual size |
-| Middle-drag | Pan |
+| Ctrl+scroll, Ctrl+0, Ctrl+1 | Zoom, fit to window, actual size (editor window) |
+| Middle-drag | Pan (editor window) |
 
 ## Settings
 
@@ -70,6 +81,8 @@ To change a hotkey, click its box and press the new key combination. Klipp check
 
 The other settings:
 
+- Choose whether capture-and-edit draws on the frozen screen or opens the editor window.
+- Turn shape snapping on or off.
 - Show the "Copied" popup after a clipboard capture.
 - Show crosshair guide lines while selecting.
 - Choose how dark the screen gets outside the selection.

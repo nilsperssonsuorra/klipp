@@ -13,6 +13,8 @@ DEFAULTS = {
     "hotkey_edit": "Alt+Shift+S",
     "autostart": True,
     "tray_click": "edit",  # "edit", "copy" or "none"
+    "edit_mode": "inplace",  # capture-and-edit draws on the frozen screen ("inplace") or opens a "window"
+    "snap_shapes": True,  # pausing at the end of a pen stroke turns a rough line/circle/box into a clean one
     "show_toast": True,  # "Copied to clipboard" bubble after a clipboard capture
     "crosshair": True,  # guide lines while choosing where to start the selection
     "dim": 45,  # how much the frozen screen is darkened outside the selection, in percent
@@ -36,7 +38,7 @@ DEFAULTS = {
 EDITOR_KEYS = ("tool", "color", "sizes", "last_save_dir")
 SETTINGS_KEYS = (
     "hotkey_copy", "hotkey_edit", "autostart", "tray_click", "show_toast",
-    "crosshair", "dim", "save_dir", "auto_save",
+    "crosshair", "dim", "save_dir", "auto_save", "edit_mode", "snap_shapes",
 )
 
 

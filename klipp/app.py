@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QWi
 
 from . import autostart, icons
 from .config import CONFIG_DIR, SETTINGS_KEYS, Config
-from .editor import EditorWindow
+from .editor import EditorWindow, save_image_dialog
 from .hotkeys import HotkeyWindow
 from .overlay import SelectionOverlay
 from .settings import SettingsDialog
@@ -199,8 +199,13 @@ class KlippApp(QObject):
         self._previous_window = ctypes.windll.user32.GetForegroundWindow()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         shot = screen.grabWindow(0)
-        self.overlay = SelectionOverlay(screen, shot, self.config["dim"], self.config["crosshair"])
-        self.overlay.selected.connect(lambda image, rect: self._on_selected(mode, image, rect, shot.devicePixelRatio()))
+        dpr = shot.devicePixelRatio()
+        draw_here = mode == "edit" and self.config["edit_mode"] != "window"
+        self.overlay = SelectionOverlay(screen, shot, self.config["dim"], self.config["crosshair"],
+                                        draw_config=self.config if draw_here else None)
+        self.overlay.selected.connect(lambda image, rect: self._on_selected(mode, image, rect, dpr))
+        self.overlay.annotated.connect(self._on_annotated)
+        self.overlay.open_editor.connect(lambda image, strokes, rect: self._open_editor(image, dpr, rect, strokes))
         self.overlay.finished.connect(self._overlay_closed)
         self.overlay.show()
         self.overlay.raise_()
@@ -235,8 +240,24 @@ class KlippApp(QObject):
                 self._toast = Toast("✓ Copied to clipboard", QPoint(rect.center().x(), rect.bottom()))
                 self._toast.show()
             return
+        self._open_editor(image, dpr, rect)
+
+    def _on_annotated(self, image, rect, action):
+        """Finished drawing on the frozen screen."""
+        if self.config["auto_save"]:
+            self._auto_save(image)
+        QGuiApplication.clipboard().setImage(image)
+        if action == "save":
+            # Keep focus with Klipp and open the dialog once the overlay is gone, so it isn't hidden.
+            self._previous_window = None
+            QTimer.singleShot(0, lambda: save_image_dialog(image, self.config))
+        elif self.config["show_toast"]:
+            self._toast = Toast("✓ Copied to clipboard", QPoint(rect.center().x(), rect.bottom()))
+            self._toast.show()
+
+    def _open_editor(self, image, dpr, rect, strokes=None):
         self._previous_window = None  # the editor takes focus instead
-        window = EditorWindow(image, dpr, self.config, self.icon)
+        window = EditorWindow(image, dpr, self.config, self.icon, strokes)
         self.windows.add(window)
         window.destroyed.connect(lambda: self.windows.discard(window))
         window.present(rect)

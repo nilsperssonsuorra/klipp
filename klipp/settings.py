@@ -19,6 +19,10 @@ from . import __version__, hotkeys
 from .config import DEFAULTS, default_save_dir
 from .theme import stylesheet
 
+EDIT_MODE_CHOICES = [
+    ("inplace", "Draw right on the frozen screen"),
+    ("window", "Open the editor window"),
+]
 TRAY_CLICK_CHOICES = [
     ("edit", "Capture and edit"),
     ("copy", "Capture to clipboard"),
@@ -159,6 +163,20 @@ class SettingsDialog(QDialog):
         for edit in (self.copy_key, self.edit_key):
             edit.changed.connect(self._validate_hotkeys)
 
+        # Drawing --------------------------------------------------------------
+        root.addSpacing(8)
+        root.addWidget(_label("Drawing", "heading"))
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Capture and edit"))
+        self.edit_mode = QComboBox()
+        for key, text in EDIT_MODE_CHOICES:
+            self.edit_mode.addItem(text, key)
+        mode_row.addWidget(self.edit_mode)
+        mode_row.addStretch(1)
+        root.addLayout(mode_row)
+        self.snap_shapes = QCheckBox("Pause at the end of a pen stroke to turn a rough line, circle or box into a clean one")
+        root.addWidget(self.snap_shapes)
+
         # Capturing ------------------------------------------------------------
         root.addSpacing(8)
         root.addWidget(_label("Capturing", "heading"))
@@ -241,6 +259,8 @@ class SettingsDialog(QDialog):
         self.autostart.setChecked(data["autostart"])
         index = self.tray_click.findData(data["tray_click"])
         self.tray_click.setCurrentIndex(max(index, 0))
+        self.edit_mode.setCurrentIndex(max(self.edit_mode.findData(data["edit_mode"]), 0))
+        self.snap_shapes.setChecked(data["snap_shapes"])
 
     def _browse(self):
         start = self.folder.text() or str(default_save_dir())
@@ -279,6 +299,8 @@ class SettingsDialog(QDialog):
             "auto_save": self.auto_save.isChecked(),
             "autostart": self.autostart.isChecked(),
             "tray_click": self.tray_click.currentData(),
+            "edit_mode": self.edit_mode.currentData(),
+            "snap_shapes": self.snap_shapes.isChecked(),
         }
 
     def accept(self):

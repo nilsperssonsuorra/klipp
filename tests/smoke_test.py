@@ -7,6 +7,7 @@ WM_HOTKEY directly, so no real key presses reach other apps.
 
 import ctypes
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -74,29 +75,32 @@ def test_editor():
     win.present()
     QTest.qWait(200)
     canvas, vp = win.canvas, win.canvas.viewport()
+    # Draw on the image itself (it's centred in the window); ink off the image is clipped away.
+    ox = canvas.mapFromScene(canvas.region.topLeft()).x() - 30
+    on = lambda pts: [(x + ox, y) for x, y in pts]  # noqa: E731
 
     win.select_tool("pen")
     win.select_color("#ff3b30")
-    drag(vp, [(60, 60), (120, 90), (180, 70), (240, 110)])
+    drag(vp, on([(60, 60), (120, 90), (180, 70), (240, 110)]))
     check(len(strokes(canvas)) == 1, "pen stroke created")
 
     win.select_tool("highlighter")
     win.select_color("#ffe600")
-    drag(vp, [(40, 160), (300, 160)])
+    drag(vp, on([(40, 160), (300, 160)]))
     win.select_tool("arrow")
     win.select_color("#2f7bff")
-    drag(vp, [(350, 250), (450, 150)])
+    drag(vp, on([(350, 250), (450, 150)]))
     win.select_tool("rect")
     win.select_color("#34c759")
-    drag(vp, [(320, 40), (480, 120)])
+    drag(vp, on([(320, 40), (480, 120)]))
     check(len(strokes(canvas)) == 4, "highlighter, arrow and rectangle created")
 
     # Right-drag inside the rectangle must NOT erase it (only its outline counts).
-    drag(vp, [(380, 70), (420, 90)], Qt.RightButton)
+    drag(vp, on([(380, 70), (420, 90)]), Qt.RightButton)
     check(len(strokes(canvas)) == 4, "right-drag inside a rectangle leaves it alone")
 
     # Right-drag across the pen stroke erases the whole stroke.
-    drag(vp, [(120, 40), (120, 130)], Qt.RightButton)
+    drag(vp, on([(120, 40), (120, 130)]), Qt.RightButton)
     check(len(strokes(canvas)) == 3, "right-drag erased the pen stroke as a whole")
     check(win.windowHandle() is not None and canvas.tool == "rect", "tool unchanged after right-erase")
 
@@ -108,13 +112,13 @@ def test_editor():
 
     # A plain click with a shape tool must not leave an invisible item or an undo step.
     steps = canvas.undo_stack.count()
-    drag(vp, [(600, 300), (600, 300)])
+    drag(vp, on([(500, 300), (500, 300)]))
     check(len(strokes(canvas)) == 4 and canvas.undo_stack.count() == steps, "click with rectangle tool adds nothing")
 
     # If the button release never arrives (focus stolen mid-drag), the canvas must recover.
     win.select_tool("pen")
-    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, QPoint(600, 350))
-    stray = QMouseEvent(QEvent.MouseMove, QPointF(610, 360), QPointF(610, 360), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, QPoint(500 + ox, 330))
+    stray = QMouseEvent(QEvent.MouseMove, QPointF(510 + ox, 340), QPointF(510 + ox, 340), Qt.NoButton, Qt.NoButton, Qt.NoModifier)
     QApplication.sendEvent(vp, stray)
     check(canvas._mode is None and len(strokes(canvas)) == 5, "lost mouse release ends the stroke instead of sticking")
     canvas.undo_stack.undo()
@@ -200,6 +204,148 @@ def test_settings():
     app.tray.hide()
 
 
+def hold_stroke(widget, points, wait_ms=0, button=Qt.LeftButton):
+    """Press, move through points, optionally rest at the end, then release."""
+    QTest.mousePress(widget, button, Qt.NoModifier, QPoint(*map(round, points[0])))
+    for x, y in points[1:]:
+        move = QMouseEvent(QEvent.MouseMove, QPointF(x, y), widget.mapToGlobal(QPointF(x, y)),
+                           Qt.NoButton, button, Qt.NoModifier)
+        QApplication.sendEvent(widget, move)
+    if wait_ms:
+        QTest.qWait(wait_ms)
+    QTest.mouseRelease(widget, button, Qt.NoModifier, QPoint(*map(round, points[-1])))
+    QApplication.processEvents()
+
+
+def wobbly_loop(cx, cy, rx, ry, n=48):
+    pts = []
+    for i in range(n):
+        f = i / (n - 1)
+        a = math.radians(-115 + 390 * f)
+        k = 1 + 0.04 * math.sin(f * math.pi * 3) + 0.05 * f
+        pts.append((cx + rx * k * math.cos(a), cy + ry * k * math.sin(a)))
+    return pts
+
+
+def test_snapping():
+    image = QPixmap(900, 500)
+    image.fill(QColor("#ffffff"))
+    win = EditorWindow(image, 1.5, scratch_config())
+    win.present()
+    QTest.qWait(200)
+    canvas, vp = win.canvas, win.canvas.viewport()
+    center = canvas.mapFromScene(canvas.region.center())
+    cx, cy = center.x(), center.y()
+    kinds = []
+    canvas.snapped.connect(kinds.append)
+
+    win.select_tool("pen")
+    hold_stroke(vp, wobbly_loop(cx, cy, 120, 50), wait_ms=700)
+    item = canvas.strokes()[-1]
+    check(kinds == ["ellipse"], f"resting at the end of a rough loop snaps it to an ellipse ({kinds})")
+    check(item.path().elementCount() < 20, "the snapped stroke is a clean ellipse path, not the freehand points")
+    canvas.undo_stack.undo()
+    check(not canvas.strokes(), "a snapped shape undoes in one step")
+
+    kinds.clear()
+    hold_stroke(vp, wobbly_loop(cx, cy, 120, 50), wait_ms=0)
+    check(kinds == [], "a stroke released without resting stays freehand")
+
+    zigzag = [(cx - 150 + i * 10, cy + 40 * math.sin(i * 0.9)) for i in range(30)]
+    hold_stroke(vp, zigzag, wait_ms=700)
+    check(kinds == [], "resting at the end of a scribble leaves it freehand")
+
+    line = [(cx - 150 + i * 12, cy + 60 + (i % 3) - 1) for i in range(26)]
+    hold_stroke(vp, line, wait_ms=700)
+    check(kinds == ["line"], f"a shaky line snaps straight ({kinds})")
+
+    kinds.clear()
+    canvas.snap_enabled = False
+    hold_stroke(vp, wobbly_loop(cx, cy, 120, 50), wait_ms=700)
+    check(kinds == [], "no snapping when it's turned off in settings")
+    win.close()
+
+
+def red_pixels(image):
+    img = image.convertToFormat(QImage.Format_RGB32)
+    count = 0
+    for y in range(0, img.height(), 2):
+        for x in range(0, img.width(), 2):
+            c = QColor(img.pixel(x, y))
+            if c.red() > 200 and c.green() < 90 and c.blue() < 90:
+                count += 1
+    return count
+
+
+def test_draw_on_screen():
+    from klipp.app import KlippApp
+
+    config = scratch_config(hotkey_copy="Ctrl+Alt+Shift+F11", hotkey_edit="Ctrl+Alt+Shift+F12",
+                            edit_mode="inplace", color="#ff3b30", tool="pen")
+    app = KlippApp(QApplication.instance(), config)
+    ids = {name: hid for hid, name in app.hotkeys._names.items()}
+    user32 = ctypes.windll.user32
+    clipboard = QGuiApplication.clipboard()
+
+    def open_selection(x0=300, y0=250, x1=700, y1=500):
+        user32.PostMessageW(app.hotkeys._hwnd, WM_HOTKEY, ids["edit"], 0)
+        wait_for(lambda: app.overlay is not None)
+        ov = app.overlay
+        QTest.mousePress(ov, Qt.LeftButton, Qt.NoModifier, QPoint(x0, y0))
+        QTest.mouseMove(ov, QPoint(x1, y1))
+        QTest.mouseRelease(ov, Qt.LeftButton, Qt.NoModifier, QPoint(x1, y1))
+        QApplication.processEvents()
+        return ov
+
+    overlay = open_selection()
+    check(overlay.canvas is not None and overlay.isVisible(), "releasing the selection keeps the frozen screen open for drawing")
+    if overlay.canvas is None:
+        return
+    tb = overlay.toolbar.geometry()
+    check(overlay.rect().contains(tb) and tb.top() >= 500, "the toolbar sits just below the selection, on screen")
+    overlay.grab().scaled(1280, 720, Qt.KeepAspectRatio, Qt.SmoothTransformation).save(str(OUT / "draw_on_screen.png"))
+
+    canvas, vp = overlay.canvas, overlay.canvas.viewport()
+    hold_stroke(vp, [(200, 200), (260, 220)])
+    check(not canvas.strokes(), "dragging outside the selection doesn't draw")
+    hold_stroke(vp, [(350, 300), (420, 330), (500, 310), (600, 360)])
+    check(len(canvas.strokes()) == 1, "drawing inside the selection works")
+    hold_stroke(vp, [(420, 280), (420, 400)], button=Qt.RightButton)
+    check(not canvas.strokes(), "right-drag erases on the frozen screen too")
+    hold_stroke(vp, wobbly_loop(500, 375, 120, 60), wait_ms=700)
+    check(len(canvas.strokes()) == 1, "draw a loop to keep")
+
+    clipboard.clear()
+    QTest.keyClick(overlay, Qt.Key_Return)
+    wait_for(lambda: app.overlay is None)
+    image = clipboard.image()
+    dpr = QGuiApplication.primaryScreen().devicePixelRatio()
+    check(app.overlay is None, "Enter finishes and closes the frozen screen")
+    check(abs(image.width() - 400 * dpr) <= 2 and abs(image.height() - 250 * dpr) <= 2,
+          f"the clipboard gets exactly the selection ({image.width()}x{image.height()})")
+    check(red_pixels(image) > 50, "the drawing is in the copied image")
+    image.save(str(OUT / "draw_on_screen_result.png"))
+
+    clipboard.clear()
+    overlay = open_selection()
+    hold_stroke(overlay.canvas.viewport(), [(350, 300), (500, 350)])
+    QTest.keyClick(overlay, Qt.Key_Escape)
+    wait_for(lambda: app.overlay is None)
+    check(app.overlay is None and clipboard.image().isNull(), "Esc cancels without copying anything")
+
+    overlay = open_selection()
+    hold_stroke(overlay.canvas.viewport(), [(350, 300), (420, 330), (500, 310)])
+    overlay.toolbar.open_button.click()
+    wait_for(lambda: app.overlay is None and app.windows)
+    editors = list(app.windows)
+    check(len(editors) == 1 and len(editors[0].canvas.strokes()) == 1,
+          "Open in window carries the drawing over to the editor")
+    for editor in editors:
+        editor.close()
+    app.hotkeys.unregister_all()
+    app.tray.hide()
+
+
 def test_hotkey_flow():
     from klipp.app import KlippApp
 
@@ -249,6 +395,8 @@ if __name__ == "__main__":
     test_editor()
     test_config_merge()
     test_settings()
+    test_snapping()
+    test_draw_on_screen()
     test_hotkey_flow()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)

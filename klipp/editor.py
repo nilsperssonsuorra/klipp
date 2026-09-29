@@ -1,4 +1,5 @@
-"""Annotation editor: draw on a screenshot, erase whole strokes, auto-copy to clipboard."""
+"""Drawing on screenshots: the canvas and tool panel shared by the editor window and the
+frozen-screen overlay, plus the editor window itself."""
 
 import math
 from datetime import datetime
@@ -17,6 +18,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTransform,
     QUndoCommand,
     QUndoStack,
 )
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
@@ -38,7 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import icons
+from . import icons, shapes
 from .config import EDITOR_KEYS
 from .theme import stylesheet
 
@@ -68,7 +71,7 @@ TOOLS = [
 FREEHAND = ("pen", "highlighter")
 HIGHLIGHTER_ALPHA = 110
 MAX_SIZE = 80
-
+SNAP_DELAY_MS = 450  # how long the pointer must rest at the end of a stroke before it snaps
 
 
 # --- scene items & undo commands --------------------------------------------
@@ -102,28 +105,33 @@ class StrokeItem(QGraphicsPathItem):
             self._shape = shape
         return self._shape
 
+    def collidesWithPath(self, path, mode=Qt.IntersectsItemShape):
+        # Strokes are clipped by the drawing layer, and for clipped items Qt tests against the
+        # whole clip area. The eraser must only hit the actual ink.
+        return path.intersects(self.shape())
+
 
 class AddItems(QUndoCommand):
-    """Records items that were already added to the scene while drawing."""
+    """Records strokes that were already put on the drawing layer while drawing."""
 
-    def __init__(self, scene, items, text="Draw"):
+    def __init__(self, layer, items, text="Draw"):
         super().__init__(text)
-        self.scene, self.items = scene, list(items)
+        self.layer, self.items = layer, list(items)
 
     def redo(self):
         for item in self.items:
             if item.scene() is None:
-                self.scene.addItem(item)
+                item.setParentItem(self.layer)
 
     def undo(self):
         for item in self.items:
             if item.scene() is not None:
-                self.scene.removeItem(item)
+                item.scene().removeItem(item)
 
 
 class RemoveItems(AddItems):
-    def __init__(self, scene, items, text="Erase"):
-        super().__init__(scene, items, text)
+    def __init__(self, layer, items, text="Erase"):
+        super().__init__(layer, items, text)
 
     def redo(self):
         AddItems.undo(self)
@@ -179,6 +187,23 @@ def arrow_path(start, end, width):
     return path
 
 
+def shape_path(shape):
+    """A clean path for a result of shapes.recognize()."""
+    kind, *values = shape
+    path = QPainterPath()
+    if kind == "line":
+        x1, y1, x2, y2 = values
+        path.moveTo(x1, y1)
+        path.lineTo(x2, y2)
+    elif kind == "rect":
+        path.addRect(QRectF(*values))
+    else:
+        cx, cy, rx, ry, angle = values
+        path.addEllipse(QPointF(0, 0), rx, ry)
+        path = QTransform().translate(cx, cy).rotate(angle).map(path)
+    return path
+
+
 def circle_cursor(diameter, dpr):
     """Cursor showing the brush footprint. diameter is in logical screen pixels."""
     d = min(max(diameter, 3.0), 240.0 / dpr)
@@ -204,29 +229,50 @@ def circle_cursor(diameter, dpr):
 
 
 class Canvas(QGraphicsView):
-    zoomChanged = Signal(float)
+    """Draw on `pixmap`. Only `region` (default: all of it) is drawn on and exported.
 
-    def __init__(self, pixmap, dpr, parent=None):
+    In the editor window the canvas zooms and scrolls. Embedded in the frozen-screen
+    overlay it shows the whole screenshot 1:1 and darkens everything outside `region`."""
+
+    zoomChanged = Signal(float)
+    snapped = Signal(str)  # a rough stroke was turned into this shape
+
+    def __init__(self, pixmap, dpr, parent=None, region=None, embedded=False, dim=45):
         super().__init__(parent)
         self.dpr = dpr
+        self.embedded = embedded
         self.tool = "pen"
         self.color = QColor("#ff3b30")
         self.sizes = {}
+        self.snap_enabled = True
+        self.region = QRectF(region) if region is not None else QRectF(pixmap.rect())
+        self._dim = QColor(0, 0, 0, round(255 * dim / 100))
 
         self.setScene(QGraphicsScene(self))
         self.background = QGraphicsPixmapItem(pixmap)
         self.background.setZValue(-1)
         self.scene().addItem(self.background)
         self.scene().setSceneRect(QRectF(pixmap.rect()))
+        # Strokes live on this layer, which clips them to the region being captured.
+        self.layer = QGraphicsRectItem(self.region)
+        self.layer.setPen(Qt.NoPen)
+        self.layer.setFlag(QGraphicsRectItem.ItemClipsChildrenToShape)
+        self.scene().addItem(self.layer)
         self.undo_stack = QUndoStack(self)
 
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setBackgroundBrush(QColor("#141517"))
         self.setFrameShape(QGraphicsView.NoFrame)
-        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setViewportUpdateMode(QGraphicsView.SmartViewportUpdate)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
         self.setMouseTracking(True)
+        if embedded:
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            self.setTransform(QTransform.fromScale(1 / dpr, 1 / dpr))
+        else:
+            self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
         self._z = 0
         self._mode = None  # "draw", "erase", "pan"
@@ -237,6 +283,8 @@ class Canvas(QGraphicsView):
         self._start = None
         self._last = None
         self._erased = []
+        self._snapped = False
+        self._snap_timer = QTimer(self, singleShot=True, interval=SNAP_DELAY_MS, timeout=self._try_snap)
 
     # zoom ------------------------------------------------------------------
 
@@ -257,21 +305,29 @@ class Canvas(QGraphicsView):
         self.set_zoom(1.0 / self.dpr)
 
     def fit(self):
-        rect = self.scene().sceneRect()
+        rect = self.region
         view = self.viewport().rect()
         zoom = min((view.width() - 20) / rect.width(), (view.height() - 20) / rect.height(), 1.0 / self.dpr)
         self.set_zoom(zoom)
         self.centerOn(rect.center())
 
     def drawForeground(self, painter, rect):
-        # Hide ink that strays outside the image, since it's not part of the output.
         outside = QPainterPath()
         outside.addRect(rect)
         inside = QPainterPath()
-        inside.addRect(self.scene().sceneRect())
-        painter.fillPath(outside.subtracted(inside), self.backgroundBrush())
+        inside.addRect(self.region)
+        if self.embedded:
+            # Same darkening as while selecting, plus a thin outline round the capture.
+            painter.fillPath(outside.subtracted(inside), self._dim)
+            painter.setPen(QPen(QColor("#2f9bff"), self.dpr))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(self.region.adjusted(-self.dpr / 2, -self.dpr / 2, self.dpr / 2, self.dpr / 2))
+        else:
+            painter.fillPath(outside.subtracted(inside), self.backgroundBrush())
 
     def wheelEvent(self, event):
+        if self.embedded:
+            return
         if event.modifiers() & Qt.ControlModifier:
             steps = event.angleDelta().y() / 120
             self.set_zoom(self.zoom * (1.15 ** steps))
@@ -296,6 +352,9 @@ class Canvas(QGraphicsView):
             color.setAlpha(HIGHLIGHTER_ALPHA)
         return QPen(color, self.size_for(self.tool), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
 
+    def strokes(self):
+        return [item for item in self.layer.childItems() if isinstance(item, StrokeItem)]
+
     # mouse -------------------------------------------------------------------
 
     def _scene_pos(self, event):
@@ -308,7 +367,7 @@ class Canvas(QGraphicsView):
         button = event.button()
         pos = self._scene_pos(event)
         self._button = button
-        if button == Qt.MiddleButton:
+        if button == Qt.MiddleButton and not self.embedded:
             self._mode = "pan"
             self._last = event.position()
             self.viewport().setCursor(Qt.ClosedHandCursor)
@@ -318,15 +377,17 @@ class Canvas(QGraphicsView):
             self._last = pos
             self.update_cursor("eraser")
             self._erase_along(pos, pos)
-        elif button == Qt.LeftButton:
+        # On the frozen screen, clicks outside the selection don't start a stroke.
+        elif button == Qt.LeftButton and (not self.embedded or self.region.contains(pos)):
             self._mode = "draw"
             self._draw_tool = self.tool
             self._start = pos
             self._points = [pos]
+            self._snapped = False
             self._item = StrokeItem(self._make_pen(), filled=self.tool == "arrow")
             self._z += 1
             self._item.setZValue(self._z)
-            self.scene().addItem(self._item)
+            self._item.setParentItem(self.layer)
             self._update_shape(pos, event.modifiers())
 
     def mouseMoveEvent(self, event):
@@ -352,19 +413,22 @@ class Canvas(QGraphicsView):
 
     def _finish(self):
         mode, self._mode = self._mode, None
+        self._snap_timer.stop()
         if mode == "draw":
             bounds = self._item.path().boundingRect()
             if self._draw_tool not in FREEHAND and max(bounds.width(), bounds.height()) < 2:
                 self.scene().removeItem(self._item)  # a click with a shape tool; nothing to keep
             else:
-                self.undo_stack.push(AddItems(self.scene(), [self._item]))
+                self.undo_stack.push(AddItems(self.layer, [self._item]))
             self._item = None
         elif mode == "erase" and self._erased:
-            self.undo_stack.push(RemoveItems(self.scene(), self._erased))
+            self.undo_stack.push(RemoveItems(self.layer, self._erased))
             self._erased = []
         self.update_cursor()
 
     def _update_shape(self, pos, modifiers):
+        if self._snapped:
+            return  # the stroke became a clean shape; it stays that way until release
         shift = bool(modifiers & Qt.ShiftModifier)
         start, tool = self._start, self._draw_tool
         if tool in FREEHAND:
@@ -375,6 +439,8 @@ class Canvas(QGraphicsView):
                 last = self._points[-1]
                 if math.hypot(pos.x() - last.x(), pos.y() - last.y()) * self.zoom >= 1.5:
                     self._points.append(pos)
+                    if self.snap_enabled:
+                        self._snap_timer.start()  # snap if the pointer rests here
                 path = smooth_path(self._points)
         elif tool in ("line", "arrow"):
             end = snap_angle(start, pos) if shift else pos
@@ -393,6 +459,22 @@ class Canvas(QGraphicsView):
                 path.addEllipse(rect)
         self._item.set_path(path)
 
+    def _try_snap(self):
+        """The pointer rested at the end of a freehand stroke: tidy it into a clean shape."""
+        if self._mode != "draw" or self._draw_tool not in FREEHAND or self._snapped:
+            return
+        allow = ("line", "ellipse", "rect") if self._draw_tool == "pen" else ("line",)
+        # Thresholds in recognize() are in pixels as seen on screen.
+        points = [(p.x() * self.zoom, p.y() * self.zoom) for p in self._points]
+        shape = shapes.recognize(points, allow)
+        if shape is None:
+            return
+        kind, *values = shape
+        values = [v / self.zoom for v in values[:4]] + values[4:]
+        self._item.set_path(shape_path((kind, *values)))
+        self._snapped = True
+        self.snapped.emit(kind)
+
     def _erase_along(self, a, b):
         stroker = QPainterPathStroker()
         stroker.setWidth(self.size_for("eraser"))
@@ -408,13 +490,13 @@ class Canvas(QGraphicsView):
     # actions -----------------------------------------------------------------
 
     def clear(self):
-        items = [i for i in self.scene().items() if isinstance(i, StrokeItem)]
+        items = self.strokes()
         if items:
-            self.undo_stack.push(RemoveItems(self.scene(), items, "Clear"))
+            self.undo_stack.push(RemoveItems(self.layer, items, "Clear"))
 
     def render_image(self):
-        rect = self.scene().sceneRect()
-        image = QImage(int(rect.width()), int(rect.height()), QImage.Format_RGB32)
+        rect = self.region
+        image = QImage(round(rect.width()), round(rect.height()), QImage.Format_RGB32)
         image.fill(Qt.black)
         painter = QPainter(image)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -422,8 +504,24 @@ class Canvas(QGraphicsView):
         painter.end()
         return image
 
+    def export_strokes(self):
+        """The drawing, relative to the region's corner, for handing to another canvas."""
+        offset = self.region.topLeft()
+        return [
+            (QPen(item.pen()), item.brush().style() != Qt.NoBrush, item.path().translated(-offset), item.zValue())
+            for item in sorted(self.strokes(), key=lambda i: i.zValue())
+        ]
 
-# --- toolbar widgets --------------------------------------------------------
+    def import_strokes(self, strokes):
+        for pen, filled, path, z in strokes:
+            item = StrokeItem(pen, filled)
+            item.set_path(path.translated(self.region.topLeft()))
+            item.setZValue(z)
+            item.setParentItem(self.layer)
+            self._z = max(self._z, z)
+
+
+# --- tool panel ---------------------------------------------------------------
 
 
 class Swatch(QAbstractButton):
@@ -434,6 +532,7 @@ class Swatch(QAbstractButton):
         self.setFixedSize(28, 28)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip(name)
+        self.setFocusPolicy(Qt.NoFocus)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -457,70 +556,50 @@ class Swatch(QAbstractButton):
         self.update()
 
 
-def _separator():
+def separator():
     line = QWidget()
     line.setFixedSize(1, 26)
     line.setStyleSheet("background: #3a3c42;")
     return line
 
 
-# --- window -----------------------------------------------------------------
+def icon_button(icon, tip, checkable=False):
+    btn = QToolButton()
+    btn.setIcon(icon)
+    btn.setIconSize(QSize(22, 22))
+    btn.setFixedSize(34, 34)
+    btn.setToolTip(tip)
+    btn.setCheckable(checkable)
+    btn.setFocusPolicy(Qt.NoFocus)
+    return btn
 
 
-class EditorWindow(QMainWindow):
-    def __init__(self, pixmap, dpr, config, app_icon=None):
-        super().__init__()
-        self.setAttribute(Qt.WA_DeleteOnClose)
+class ToolPanel(QWidget):
+    """Tools, colours, brush size, undo/redo and clear for one canvas."""
+
+    def __init__(self, canvas, config, parent=None):
+        super().__init__(parent)
+        self.canvas = canvas
         self.config = config
-        self.setWindowTitle(f"Klipp — {pixmap.width()} × {pixmap.height()}")
-        if app_icon is not None:
-            self.setWindowIcon(app_icon)
-        self.setStyleSheet(stylesheet())
+        canvas.sizes = dict(config["sizes"])
+        canvas.color = QColor(config["color"])
+        canvas.snap_enabled = bool(config["snap_shapes"])
 
-        self.canvas = Canvas(pixmap, dpr, self)
-        self.canvas.sizes = dict(config["sizes"])
-        self.canvas.color = QColor(config["color"])
-
-        central = QWidget()
-        column = QVBoxLayout(central)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(0)
-        column.addWidget(self._build_toolbar())
-        column.addWidget(self.canvas, 1)
-        self.setCentralWidget(central)
-
-        self._copy_timer = QTimer(self, singleShot=True, interval=150, timeout=self.copy_to_clipboard)
-        self.canvas.undo_stack.indexChanged.connect(lambda _: self._copy_timer.start())
-        self.canvas.undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
-        self.canvas.undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
-        self.canvas.zoomChanged.connect(lambda z: self.zoom_label.setText(f"{round(z * dpr * 100)}%"))
-        self._build_shortcuts()
-
-        tool = config["tool"] if config["tool"] in dict((t[0], t) for t in TOOLS) else "pen"
-        self.select_tool(tool)
-        self.select_color(config["color"])
-        self._flash = QTimer(self, singleShot=True, interval=1400, timeout=lambda: self.copied_label.setText(""))
-
-    # construction ------------------------------------------------------------
-
-    def _build_toolbar(self):
-        bar = QWidget(objectName="toolbar")
-        bar.setAttribute(Qt.WA_StyledBackground)
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(8, 6, 8, 6)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(2)
 
         self.tool_group = QButtonGroup(self, exclusive=True)
         self.tool_buttons = {}
         for key, name, shortcut in TOOLS:
-            btn = self._icon_button(icons.tool_icon(key), f"{name} ({shortcut})", checkable=True)
+            btn = icon_button(icons.tool_icon(key), f"{name} ({shortcut})", checkable=True)
             btn.clicked.connect(lambda _=False, k=key: self.select_tool(k))
             self.tool_group.addButton(btn)
             self.tool_buttons[key] = btn
             row.addWidget(btn)
 
         row.addSpacing(8)
-        row.addWidget(_separator())
+        row.addWidget(separator())
         row.addSpacing(8)
 
         self.color_group = QButtonGroup(self, exclusive=True)
@@ -534,13 +613,14 @@ class EditorWindow(QMainWindow):
             row.addWidget(swatch)
 
         row.addSpacing(8)
-        row.addWidget(_separator())
+        row.addWidget(separator())
         row.addSpacing(10)
 
         self.size_slider = QSlider(Qt.Horizontal)
         self.size_slider.setRange(1, MAX_SIZE)
-        self.size_slider.setFixedWidth(120)
+        self.size_slider.setFixedWidth(110)
         self.size_slider.setToolTip("Size  ( -  and  + )")
+        self.size_slider.setFocusPolicy(Qt.NoFocus)
         self.size_slider.valueChanged.connect(self._size_changed)
         row.addWidget(self.size_slider)
         self.size_label = QLabel()
@@ -549,51 +629,32 @@ class EditorWindow(QMainWindow):
         row.addWidget(self.size_label)
 
         row.addSpacing(8)
-        row.addWidget(_separator())
+        row.addWidget(separator())
         row.addSpacing(8)
 
-        self.undo_button = self._icon_button(icons.tool_icon("undo"), "Undo (Ctrl+Z)")
-        self.undo_button.clicked.connect(self.canvas.undo_stack.undo)
+        self.undo_button = icon_button(icons.tool_icon("undo"), "Undo (Ctrl+Z)")
+        self.undo_button.clicked.connect(canvas.undo_stack.undo)
         self.undo_button.setEnabled(False)
+        canvas.undo_stack.canUndoChanged.connect(self.undo_button.setEnabled)
         row.addWidget(self.undo_button)
-        self.redo_button = self._icon_button(icons.tool_icon("redo"), "Redo (Ctrl+Y)")
-        self.redo_button.clicked.connect(self.canvas.undo_stack.redo)
+        self.redo_button = icon_button(icons.tool_icon("redo"), "Redo (Ctrl+Y)")
+        self.redo_button.clicked.connect(canvas.undo_stack.redo)
         self.redo_button.setEnabled(False)
+        canvas.undo_stack.canRedoChanged.connect(self.redo_button.setEnabled)
         row.addWidget(self.redo_button)
-        clear = self._icon_button(icons.tool_icon("clear"), "Erase all drawings")
-        clear.clicked.connect(self.canvas.clear)
+        clear = icon_button(icons.tool_icon("clear"), "Erase all drawings")
+        clear.clicked.connect(canvas.clear)
         row.addWidget(clear)
 
-        row.addStretch(1)
-        self.copied_label = QLabel()
-        self.copied_label.setStyleSheet("color: #5ad17a;")
-        row.addWidget(self.copied_label)
-        row.addSpacing(8)
-        self.zoom_label = QLabel("100%")
-        self.zoom_label.setToolTip("Ctrl+scroll to zoom, Ctrl+0 fit, Ctrl+1 actual size")
-        row.addWidget(self.zoom_label)
-        row.addSpacing(6)
-        copy = self._icon_button(icons.tool_icon("copy"), "Copy (Ctrl+C) — happens automatically")
-        copy.clicked.connect(self.copy_to_clipboard)
-        row.addWidget(copy)
-        save = self._icon_button(icons.tool_icon("save"), "Save as (Ctrl+S)")
-        save.clicked.connect(self.save_as)
-        row.addWidget(save)
-        return bar
+        tool = config["tool"] if config["tool"] in {t[0] for t in TOOLS} else "pen"
+        self.select_tool(tool)
+        self.select_color(config["color"])
 
-    def _icon_button(self, icon, tip, checkable=False):
-        btn = QToolButton()
-        btn.setIcon(icon)
-        btn.setIconSize(QSize(22, 22))
-        btn.setFixedSize(34, 34)
-        btn.setToolTip(tip)
-        btn.setCheckable(checkable)
-        btn.setFocusPolicy(Qt.NoFocus)
-        return btn
+    def install_shortcuts(self, host):
+        """Tool, colour, size and undo keys, active while `host`'s window has focus."""
 
-    def _build_shortcuts(self):
         def bind(seq, fn):
-            QShortcut(QKeySequence(seq), self, activated=fn)
+            QShortcut(QKeySequence(seq), host, activated=fn)
 
         for key, _, shortcut in TOOLS:
             bind(shortcut, lambda k=key: self.select_tool(k))
@@ -602,24 +663,14 @@ class EditorWindow(QMainWindow):
         bind("Ctrl+Z", self.canvas.undo_stack.undo)
         bind("Ctrl+Y", self.canvas.undo_stack.redo)
         bind("Ctrl+Shift+Z", self.canvas.undo_stack.redo)
-        bind("Ctrl+C", self.copy_to_clipboard)
-        bind("Ctrl+S", self.save_as)
-        bind("Ctrl+W", self.close)
-        bind("Ctrl+0", self.canvas.fit)
-        bind("Ctrl+1", self.canvas.actual_size)
-        bind("Ctrl+=", lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25))
-        bind("Ctrl++", lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25))
-        bind("Ctrl+-", lambda: self.canvas.set_zoom(self.canvas.zoom / 1.25))
         for key in ("[", "-"):
-            bind(key, lambda: self._step_size(-1))
+            bind(key, lambda: self.step_size(-1))
         for key in ("]", "+"):
-            bind(key, lambda: self._step_size(1))
+            bind(key, lambda: self.step_size(1))
 
-    def _step_size(self, direction):
+    def step_size(self, direction):
         value = self.size_slider.value()
         self.size_slider.setValue(value + direction * max(1, value // 6))
-
-    # state -------------------------------------------------------------------
 
     def select_tool(self, tool):
         self.canvas.tool = tool
@@ -646,7 +697,100 @@ class EditorWindow(QMainWindow):
         self.canvas.update_cursor()
         self.config["sizes"] = dict(self.canvas.sizes)
 
-    # output ------------------------------------------------------------------
+
+# --- saving -------------------------------------------------------------------
+
+
+def save_image_dialog(image, config, parent=None):
+    """Ask where to save `image` (PNG or JPG). Returns the path, or None if cancelled."""
+    folder = Path(config["last_save_dir"] or config.save_dir())
+    name = datetime.now().strftime("Klipp %Y-%m-%d %H%M%S.png")
+    path, _ = QFileDialog.getSaveFileName(
+        parent, "Save screenshot", str(folder / name), "PNG image (*.png);;JPEG image (*.jpg *.jpeg)"
+    )
+    if not path:
+        return None
+    ok = image.save(path, quality=95) if path.lower().endswith((".jpg", ".jpeg")) else image.save(path)
+    if not ok:
+        QMessageBox.warning(parent, "Klipp", f"Could not save to\n{path}")
+        return None
+    config["last_save_dir"] = str(Path(path).parent)
+    config.save(["last_save_dir"])
+    return path
+
+
+# --- window -----------------------------------------------------------------
+
+
+class EditorWindow(QMainWindow):
+    def __init__(self, pixmap, dpr, config, app_icon=None, strokes=None):
+        super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.config = config
+        self.setWindowTitle(f"Klipp — {pixmap.width()} × {pixmap.height()}")
+        if app_icon is not None:
+            self.setWindowIcon(app_icon)
+        self.setStyleSheet(stylesheet())
+
+        self.canvas = Canvas(pixmap, dpr, self)
+        if strokes:
+            self.canvas.import_strokes(strokes)
+        self.panel = ToolPanel(self.canvas, config)
+        self.tool_buttons, self.swatches = self.panel.tool_buttons, self.panel.swatches
+        self.select_tool, self.select_color = self.panel.select_tool, self.panel.select_color
+
+        central = QWidget()
+        column = QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self._build_toolbar())
+        column.addWidget(self.canvas, 1)
+        self.setCentralWidget(central)
+
+        self._copy_timer = QTimer(self, singleShot=True, interval=150, timeout=self.copy_to_clipboard)
+        self.canvas.undo_stack.indexChanged.connect(lambda _: self._copy_timer.start())
+        self.canvas.zoomChanged.connect(lambda z: self.zoom_label.setText(f"{round(z * dpr * 100)}%"))
+        self._flash = QTimer(self, singleShot=True, interval=1400, timeout=lambda: self.copied_label.setText(""))
+        self._build_shortcuts()
+
+    def _build_toolbar(self):
+        bar = QWidget(objectName="toolbar")
+        bar.setAttribute(Qt.WA_StyledBackground)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(2)
+        row.addWidget(self.panel)
+        row.addStretch(1)
+        self.copied_label = QLabel()
+        self.copied_label.setStyleSheet("color: #5ad17a;")
+        row.addWidget(self.copied_label)
+        row.addSpacing(8)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setToolTip("Ctrl+scroll to zoom, Ctrl+0 fit, Ctrl+1 actual size")
+        row.addWidget(self.zoom_label)
+        row.addSpacing(6)
+        copy = icon_button(icons.tool_icon("copy"), "Copy (Ctrl+C) — happens automatically")
+        copy.clicked.connect(self.copy_to_clipboard)
+        row.addWidget(copy)
+        save = icon_button(icons.tool_icon("save"), "Save as (Ctrl+S)")
+        save.clicked.connect(self.save_as)
+        row.addWidget(save)
+        return bar
+
+    def _build_shortcuts(self):
+        self.panel.install_shortcuts(self)
+
+        def bind(seq, fn):
+            QShortcut(QKeySequence(seq), self, activated=fn)
+
+        bind("Ctrl+C", self.copy_to_clipboard)
+        bind("Ctrl+S", self.save_as)
+        bind("Ctrl+W", self.close)
+        bind("Ctrl+0", self.canvas.fit)
+        bind("Ctrl+1", self.canvas.actual_size)
+        bind("Ctrl+=", lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25))
+        bind("Ctrl++", lambda: self.canvas.set_zoom(self.canvas.zoom * 1.25))
+        bind("Ctrl+-", lambda: self.canvas.set_zoom(self.canvas.zoom / 1.25))
 
     def copy_to_clipboard(self):
         QGuiApplication.clipboard().setImage(self.canvas.render_image())
@@ -654,34 +798,19 @@ class EditorWindow(QMainWindow):
         self._flash.start()
 
     def save_as(self):
-        folder = Path(self.config["last_save_dir"] or self.config.save_dir())
-        name = datetime.now().strftime("Klipp %Y-%m-%d %H%M%S.png")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save screenshot", str(folder / name), "PNG image (*.png);;JPEG image (*.jpg *.jpeg)"
-        )
-        if not path:
-            return
-        image = self.canvas.render_image()
-        ok = image.save(path, quality=95) if path.lower().endswith((".jpg", ".jpeg")) else image.save(path)
-        if not ok:
-            QMessageBox.warning(self, "Klipp", f"Could not save to\n{path}")
-            return
-        self.config["last_save_dir"] = str(Path(path).parent)
-        self.config.save(["last_save_dir"])
-
-    # window ------------------------------------------------------------------
+        save_image_dialog(self.canvas.render_image(), self.config, self)
 
     def present(self, near_rect=None):
         """Size the window to the image (1:1 if it fits) and show it."""
         screen = QGuiApplication.screenAt(near_rect.center()) if near_rect else None
         screen = screen or QGuiApplication.primaryScreen()
         avail = screen.availableGeometry()
-        scene = self.canvas.scene().sceneRect()
+        region = self.canvas.region
         dpr = self.canvas.dpr
         toolbar_w = self.centralWidget().sizeHint().width()
         chrome_h = 60  # toolbar height + margins
-        width = min(max(scene.width() / dpr + 40, toolbar_w, 640), avail.width() * 0.92)
-        height = min(max(scene.height() / dpr + chrome_h + 40, 360), avail.height() * 0.92)
+        width = min(max(region.width() / dpr + 40, toolbar_w, 640), avail.width() * 0.92)
+        height = min(max(region.height() / dpr + chrome_h + 40, 360), avail.height() * 0.92)
         self.resize(int(width), int(height))
         self.move(avail.center() - self.rect().center())
         self.show()

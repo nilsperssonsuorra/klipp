@@ -33,11 +33,12 @@ from PySide6.QtGui import (
     QPolygonF,
     QRadialGradient,
 )
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from klipp import icons
+from klipp import hotkeys, icons
 from klipp.config import DEFAULTS, Config
-from klipp.editor import EditorWindow
+from klipp.app import Toast
 from klipp.overlay import SelectionOverlay
 from klipp.settings import SettingsDialog
 
@@ -381,14 +382,8 @@ def off_screen(widget):
 # --- storyboard -------------------------------------------------------------------
 
 
-def select_area(rec, desktop, keys, start, end, cursor):
-    """Hotkey badge, frozen overlay, drag a selection. Returns the cropped capture."""
-    overlay = SelectionOverlay(QGuiApplication.primaryScreen(), desktop, 45, True)
-    overlay.setGeometry(0, 0, W, H)
-    off_screen(overlay)
-    result = {}
-    overlay.selected.connect(lambda crop, rect: result.update(crop=crop))
-
+def select_area(rec, overlay, desktop, keys, start, end, cursor):
+    """Hotkey badge, frozen overlay, drag a selection."""
     rec.frame([(desktop, (0, 0))], ("arrow", cursor), badge=keys, repeat=6)
     for i in range(8):
         pos = lerp(cursor, start, (i + 1) / 8)
@@ -402,7 +397,6 @@ def select_area(rec, desktop, keys, start, end, cursor):
     rec.frame([(overlay.grab(), (0, 0))], ("cross", end), repeat=3)
     send_mouse(overlay, QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton)
     QApplication.processEvents()
-    return result["crop"]
 
 
 def phrase_rect(line, phrase):
@@ -433,8 +427,9 @@ def hand_circle(rect, points=34):
         f = t / (points - 1)
         a = math.radians(-115 + 390 * f)  # start near the top, go round once and a bit more
         wobble = math.sin(f * math.pi * 3)
-        x = (rx + 8 * f + 3 * wobble) * math.cos(a)  # finishes a few px outside where it started
-        y = (ry + 2 * f + 1.5 * wobble) * math.sin(a)
+        # Clearly hand-made (so the snap to a clean ellipse is visible), finishing outside its start.
+        x = (rx + 14 * f + 7 * wobble) * math.cos(a)
+        y = (ry + 3 * f + 3 * wobble) * math.sin(a)
         out.append((cx + x * math.cos(tilt) - y * math.sin(tilt), cy + x * math.sin(tilt) + y * math.cos(tilt)))
     return out
 
@@ -447,93 +442,82 @@ def main():
     desktop = paint_desktop(d)
     rec = Recorder(d)
 
-    # Keep the demo away from the real clipboard.
-    EditorWindow.copy_to_clipboard = lambda self: (self.copied_label.setText("✓ Copied"), self._flash.start())
-
-    # 1) Alt+Shift+S and drag over the error.
-    start = (TERMINAL.left() + 4, LINE_RECTS[3].top() - 8)
-    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 21)
-    crop = select_area(rec, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
-
+    # 1) Alt+Shift+S and drag over the error. The frozen screen stays up for drawing.
     config = Config(json.loads(json.dumps(DEFAULTS)))
     config.save = lambda keys: None
-    editor = EditorWindow(crop, d, config)
-    editor.resize(1120, int(crop.height() / d) + 66)
-    off_screen(editor)
-    editor.canvas.fit()
-    QApplication.processEvents()
-    vp = editor.canvas.viewport()
-
-    def editor_layers():
-        pm, (cx, cy) = window_chrome(editor.grab(), editor.windowTitle(), d)
-        ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2 - 40
-        return [(desktop, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
-
-    def to_frame(vp_pos):
-        _, origin = editor_layers()
-        off = vp.mapTo(editor, QPoint(0, 0))
-        return (origin[0] + off.x() + vp_pos[0], origin[1] + off.y() + vp_pos[1])
-
-    def to_vp(desktop_pos):
-        """A point on the staged desktop -> the same spot in the editor's viewport."""
-        x, y = desktop_pos[0] - start[0], desktop_pos[1] - start[1]
-        pt = editor.canvas.mapFromScene(QPointF(x * d, y * d))
-        return (pt.x(), pt.y())
+    overlay = SelectionOverlay(QGuiApplication.primaryScreen(), desktop, 45, True, draw_config=config)
+    overlay.setGeometry(0, 0, W, H)
+    off_screen(overlay)
+    result = {}
+    overlay.annotated.connect(lambda image, rect, action: result.update(image=image, rect=rect))
+    start = (TERMINAL.left() + 4, LINE_RECTS[3].top() - 8)
+    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 21)
+    select_area(rec, overlay, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
+    canvas = overlay.canvas
+    vp = canvas.viewport()  # covers the whole overlay, so its coordinates are frame coordinates
 
     def frame(cursor, caption=None, badge=None, repeat=1):
-        layers, _ = editor_layers()
-        rec.frame(layers, cursor, badge=badge, caption=caption, repeat=repeat)
+        rec.frame([(overlay.grab(), (0, 0))], cursor, badge=badge, caption=caption, repeat=repeat)
 
     def brush(tool=None):
-        return editor.canvas.size_for(tool or editor.canvas.tool) * editor.canvas.zoom
+        return canvas.size_for(tool or canvas.tool) * canvas.zoom
 
-    def stroke(points, caption=None, button=Qt.LeftButton, tool=None, badge=None):
-        points = [to_vp(pt) for pt in points]
+    def stroke(points, caption=None, button=Qt.LeftButton, tool=None, badge=None, snap_caption=None):
+        """Draw through `points`. With snap_caption, rest at the end until the stroke snaps."""
         send_mouse(vp, QEvent.MouseButtonPress, points[0], button, button)
         for pt in points[1:]:
             send_mouse(vp, QEvent.MouseMove, pt, Qt.NoButton, button)
-            frame(("brush", to_frame(pt), brush(tool)), caption, badge=badge)
+            frame(("brush", pt, brush(tool)), caption, badge=badge)
+        if snap_caption:
+            frame(("brush", points[-1], brush(tool)), snap_caption, badge=badge, repeat=8)  # the rough stroke, resting
+            QTest.qWait(600)  # the real snap timer
+            frame(("brush", points[-1], brush(tool)), snap_caption, badge=badge, repeat=14)
         send_mouse(vp, QEvent.MouseButtonRelease, points[-1], button, Qt.NoButton)
-        return to_frame(points[-1])
+        return points[-1]
 
-    def move(a, b, frames, caption=None, tool=None):
+    def move(a, b, frames, caption=None, tool=None, kind="brush"):
         for i in range(frames):
-            frame(("brush", lerp(a, b, (i + 1) / frames), brush(tool)), caption)
+            frame((kind, lerp(a, b, (i + 1) / frames), brush(tool)), caption)
 
-    # 2) Circle the wrong line by mistake...
+    # 2) A rough loop round the wrong line: pause, and it snaps into a clean ellipse...
     frame(("arrow", end), repeat=6)
     wrong = hand_circle(glyphs(5), points=26)
-    move(end, to_frame(to_vp(wrong[0])), 6)
-    at = stroke(wrong, badge={"button": "left", "text": "Drag to draw"})
+    move(end, wrong[0], 6)
+    at = stroke(wrong, badge={"button": "left", "text": "Drag to draw"}, snap_caption="Pause, and it snaps into shape")
 
     # ...right-drag wipes the whole stroke...
     caption = "Wrong line? Erase the whole stroke"
     right_drag = {"button": "right", "text": "Right-drag"}
     corner = (LINE_RECTS[5].left(), LINE_RECTS[5].center().y())  # sweep across the loop's left end
     wipe = [(corner[0] - 44 + t * 6, corner[1] - 34 + t * 6) for t in range(9)]
-    move(at, to_frame(to_vp(wipe[0])), 8, caption, tool="eraser")
-    editor.canvas.update_cursor("eraser")
-    frame(("brush", to_frame(to_vp(wipe[0])), brush("eraser")), caption, badge=right_drag, repeat=4)
+    move(at, wipe[0], 8, caption, tool="eraser")
+    canvas.update_cursor("eraser")
+    frame(("brush", wipe[0], brush("eraser")), caption, badge=right_drag, repeat=4)
     at = stroke(wipe, caption, button=Qt.RightButton, tool="eraser", badge=right_drag)
     frame(("brush", at, brush("eraser")), caption, badge=right_drag, repeat=8)
 
-    # ...and circle the real error.
-    swatch = editor.swatches[2]  # yellow: stands out on the red error text
-    center = swatch.mapTo(editor, swatch.rect().center())
-    _, origin = editor_layers()
-    button = (origin[0] + center.x(), origin[1] + center.y())
-    for i in range(10):
-        frame(("arrow", lerp(at, button, (i + 1) / 10)))
+    # ...pick yellow in the toolbar and loop the real error.
+    swatch = overlay.toolbar.panel.swatches[2]  # yellow: stands out on the red error text
+    center = swatch.mapTo(overlay, swatch.rect().center())
+    button = (center.x(), center.y())
+    move(at, button, 10, kind="arrow")
     swatch.click()
     frame(("arrow", button), repeat=5)
     right = hand_circle(glyphs(8), points=34)
-    move(button, to_frame(to_vp(right[0])), 8)
-    at = stroke(right)
-    editor.copy_to_clipboard()
-    frame(("arrow", at), repeat=12)
+    move(button, right[0], 8)
+    at = stroke(right, snap_caption="Pause, and it snaps into shape")
+    frame(("arrow", at), repeat=6)
 
-    # 3) Paste into the chat and send. The editor put the image on the clipboard already.
-    posted = QPixmap.fromImage(editor.canvas.render_image())
+    # 3) Enter copies it and the frozen screen goes away.
+    frame(("arrow", at), badge=["Enter"], repeat=8)
+    overlay._done("copy")
+    toast = Toast("✓ Copied to clipboard", QPoint(result["rect"].center().x(), result["rect"].bottom()))
+    off_screen(toast)
+    for i in range(14):
+        rec.frame([(desktop, (0, 0)), (toast.grab(), (toast.x(), toast.y()))], ("arrow", at))
+
+    # 4) Paste into the chat and send.
+    posted = QPixmap.fromImage(result["image"])
     posted.setDevicePixelRatio(d)
 
     def chat(repeat=1, cursor=None, badge=None, caption=None, **composer):
@@ -569,6 +553,9 @@ def main():
     print(f"{gif}: {len(rec.frames)} frames, {len(rec.frames) / FPS:.1f}s, {gif.stat().st_size / 1e6:.1f} MB")
 
     # --- settings screenshot -----------------------------------------------------
+    # The real Settings window releases Klipp's own hotkeys first; a running Klipp would
+    # otherwise show them as taken here.
+    hotkeys.is_available = lambda text: True
     dialog = SettingsDialog(config)
     dialog.folder.setPlaceholderText(r"C:\Users\you\Pictures\Klipp")
     off_screen(dialog)

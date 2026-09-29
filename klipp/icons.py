@@ -76,6 +76,15 @@ def tool_icon(kind):
         p.drawRoundedRect(QRectF(10, 10, 44, 44), 5, 5)
         p.drawRect(QRectF(20, 10, 22, 14))
         p.drawRoundedRect(QRectF(18, 34, 28, 20), 2, 2)
+    elif kind == "done":
+        p.setPen(_pen(6))
+        p.drawPolyline(QPolygonF([QPointF(14, 33), QPointF(27, 46), QPointF(50, 19)]))
+    elif kind == "expand":
+        p.drawRoundedRect(QRectF(10, 14, 44, 36), 4, 4)
+        p.drawLine(QPointF(10, 24), QPointF(54, 24))
+    elif kind == "close":
+        p.drawLine(QPointF(18, 18), QPointF(46, 46))
+        p.drawLine(QPointF(46, 18), QPointF(18, 46))
     elif kind == "clear":
         p.drawLine(QPointF(12, 18), QPointF(52, 18))
         p.drawLine(QPointF(26, 18), QPointF(28, 10))
