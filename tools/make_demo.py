@@ -66,7 +66,7 @@ TERMINAL_LINES = [
     ("    upload(build_dir)", "#c9ccd3"),
     ('  File "deploy.py", line 17, in upload', "#8f96a3"),
     ("    client.put(path, data, timeout=30)", "#c9ccd3"),
-    ("ConnectionError: timed out after 30s (host: api.internal)", "#ff6b6b"),
+    ("ConnectionError: timed out after 30s", "#ff6b6b"),
     ("PS C:\\projects\\shop> ", "#8ae28a"),
 ]
 LINE_RECTS = []  # visible text of each terminal line, filled in by paint_desktop
@@ -186,7 +186,7 @@ def paint_desktop(d, posted=None, composer=None):
     metrics = QFontMetrics(mono)
     p.setFont(mono)
     LINE_RECTS.clear()
-    x, baseline = TERMINAL.left() + 22, TERMINAL.top() + 38 + 34
+    x, baseline = TERMINAL.left() + 56, TERMINAL.top() + 38 + 34
     for text, color in TERMINAL_LINES:
         p.setPen(QColor(color))
         p.drawText(QPointF(x, baseline), text)
@@ -194,8 +194,9 @@ def paint_desktop(d, posted=None, composer=None):
         LINE_RECTS.append(QRectF(x + indent, baseline - metrics.ascent(),
                                  metrics.horizontalAdvance(text.strip()), metrics.height()))
         baseline += 40
-    p.fillRect(QRectF(LINE_RECTS[-1].right() + 2, LINE_RECTS[-1].top() + 2, 10, metrics.height() - 4),
-               QColor("#c9ccd3"))
+    prompt_baseline = LINE_RECTS[-1].top() + metrics.ascent()
+    p.fillRect(QRectF(LINE_RECTS[-1].right() + 2, prompt_baseline - metrics.capHeight() - 1, 10,
+                      metrics.capHeight() + 3), QColor("#c9ccd3"))
 
     # Team chat.
     draw_window(p, CHAT, "#deploys  ·  Team chat", "#313338", "#2b2d31", "#dbdee1")
@@ -404,11 +405,38 @@ def select_area(rec, desktop, keys, start, end, cursor):
     return result["crop"]
 
 
-def ellipse_around(rect, pad_x, pad_y, points=26):
+def phrase_rect(line, phrase):
+    """Where `phrase` sits on terminal line `line` (monospace, so it's simple arithmetic)."""
+    text = TERMINAL_LINES[line][0].strip()
+    metrics = QFontMetrics(QFont("Consolas", 14))
+    rect = LINE_RECTS[line]
+    left = rect.left() + metrics.horizontalAdvance(text[: text.index(phrase)])
+    return QRectF(left, rect.top(), metrics.horizontalAdvance(phrase), rect.height())
+
+
+def glyphs(line):
+    """The ink of terminal line `line`: from cap height to descender, not the full line box."""
+    metrics = QFontMetrics(QFont("Consolas", 14))
+    rect = LINE_RECTS[line]
+    baseline = rect.top() + metrics.ascent()
+    return QRectF(rect.left(), baseline - metrics.capHeight(), rect.width(), metrics.capHeight() + metrics.descent())
+
+
+def hand_circle(rect, points=34):
+    """A loop around `rect` that looks drawn by hand: roomy enough that the text's corners
+    sit well inside it, slightly tilted and wobbly, and finishing a little past where it began."""
     cx, cy = rect.center().x(), rect.center().y()
-    rx, ry = rect.width() / 2 + pad_x, rect.height() / 2 + pad_y
-    return [(cx + rx * math.cos(a), cy + ry * math.sin(a))
-            for a in (math.radians(-110 + t * 375 / (points - 1)) for t in range(points))]
+    rx, ry = rect.width() / 2 + 34, rect.height() / 2 + 12
+    tilt = -math.atan2(3, rx)  # the ends sit ~3 px off level, however wide the loop is
+    out = []
+    for t in range(points):
+        f = t / (points - 1)
+        a = math.radians(-115 + 390 * f)  # start near the top, go round once and a bit more
+        wobble = math.sin(f * math.pi * 3)
+        x = (rx + 8 * f + 3 * wobble) * math.cos(a)  # finishes a few px outside where it started
+        y = (ry + 2 * f + 1.5 * wobble) * math.sin(a)
+        out.append((cx + x * math.cos(tilt) - y * math.sin(tilt), cy + x * math.sin(tilt) + y * math.cos(tilt)))
+    return out
 
 
 def main():
@@ -423,8 +451,8 @@ def main():
     EditorWindow.copy_to_clipboard = lambda self: (self.copied_label.setText("✓ Copied"), self._flash.start())
 
     # 1) Alt+Shift+S and drag over the error.
-    start = (TERMINAL.left() + 12, LINE_RECTS[3].top() - 8)
-    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 14)
+    start = (TERMINAL.left() + 4, LINE_RECTS[3].top() - 8)
+    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 21)
     crop = select_area(rec, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
 
     config = Config(json.loads(json.dumps(DEFAULTS)))
@@ -474,15 +502,15 @@ def main():
 
     # 2) Circle the wrong line by mistake...
     frame(("arrow", end), repeat=6)
-    wrong = ellipse_around(LINE_RECTS[5], 16, 10, points=22)
+    wrong = hand_circle(glyphs(5), points=26)
     move(end, to_frame(to_vp(wrong[0])), 6)
     at = stroke(wrong, badge={"button": "left", "text": "Drag to draw"})
 
     # ...right-drag wipes the whole stroke...
     caption = "Wrong line? Erase the whole stroke"
     right_drag = {"button": "right", "text": "Right-drag"}
-    left_edge = (LINE_RECTS[5].left() - 16, LINE_RECTS[5].center().y())
-    wipe = [(left_edge[0] - 6 + t * 2, left_edge[1] - 26 + t * 7) for t in range(9)]
+    corner = (LINE_RECTS[5].left(), LINE_RECTS[5].center().y())  # sweep across the loop's left end
+    wipe = [(corner[0] - 44 + t * 6, corner[1] - 34 + t * 6) for t in range(9)]
     move(at, to_frame(to_vp(wipe[0])), 8, caption, tool="eraser")
     editor.canvas.update_cursor("eraser")
     frame(("brush", to_frame(to_vp(wipe[0])), brush("eraser")), caption, badge=right_drag, repeat=4)
@@ -490,8 +518,16 @@ def main():
     frame(("brush", at, brush("eraser")), caption, badge=right_drag, repeat=8)
 
     # ...and circle the real error.
-    right = ellipse_around(LINE_RECTS[8], 18, 10, points=28)
-    move(at, to_frame(to_vp(right[0])), 6)
+    swatch = editor.swatches[2]  # yellow: stands out on the red error text
+    center = swatch.mapTo(editor, swatch.rect().center())
+    _, origin = editor_layers()
+    button = (origin[0] + center.x(), origin[1] + center.y())
+    for i in range(10):
+        frame(("arrow", lerp(at, button, (i + 1) / 10)))
+    swatch.click()
+    frame(("arrow", button), repeat=5)
+    right = hand_circle(glyphs(8), points=34)
+    move(button, to_frame(to_vp(right[0])), 8)
     at = stroke(right)
     editor.copy_to_clipboard()
     frame(("arrow", at), repeat=12)
