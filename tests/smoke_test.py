@@ -204,6 +204,15 @@ def test_settings():
     app.tray.hide()
 
 
+def press_key(widget, key, mods=Qt.NoModifier):
+    """Keyboard shortcuts only reach the active window; make sure it is before pressing."""
+    from klipp.app import force_foreground
+
+    force_foreground(widget)
+    wait_for(lambda: QApplication.activeWindow() is widget, 1000)
+    QTest.keyClick(widget, key, mods)
+
+
 def hold_stroke(widget, points, wait_ms=0, button=Qt.LeftButton):
     """Press, move through points, optionally rest at the end, then release."""
     QTest.mousePress(widget, button, Qt.NoModifier, QPoint(*map(round, points[0])))
@@ -316,7 +325,7 @@ def test_draw_on_screen():
     check(len(canvas.strokes()) == 1, "draw a loop to keep")
 
     clipboard.clear()
-    QTest.keyClick(overlay, Qt.Key_Return)
+    press_key(overlay, Qt.Key_Return)
     wait_for(lambda: app.overlay is None)
     image = clipboard.image()
     dpr = QGuiApplication.primaryScreen().devicePixelRatio()
@@ -329,7 +338,7 @@ def test_draw_on_screen():
     clipboard.clear()
     overlay = open_selection()
     hold_stroke(overlay.canvas.viewport(), [(350, 300), (500, 350)])
-    QTest.keyClick(overlay, Qt.Key_Escape)
+    press_key(overlay, Qt.Key_Escape)
     wait_for(lambda: app.overlay is None)
     check(app.overlay is None and clipboard.image().isNull(), "Esc cancels without copying anything")
 
@@ -392,6 +401,13 @@ def test_finish_gestures():
     wait_for(lambda: app.overlay is None)
     check(app.overlay is None and red_pixels(clipboard.image()) > 20, "clicking outside the selection copies and closes")
 
+    # Space does the same.
+    clipboard.clear()
+    overlay = open_selection()
+    press_key(overlay, Qt.Key_Space)
+    wait_for(lambda: app.overlay is None)
+    check(app.overlay is None and red_pixels(clipboard.image()) > 20, "Space copies and closes")
+
     # Ctrl+V: copy, close, and paste into the window you came from.
     target = PasteTarget()
     target.show()
@@ -403,7 +419,7 @@ def test_finish_gestures():
         print("SKIP Ctrl+V paste test: couldn't bring the test window to the front")
     else:
         overlay = open_selection()
-        QTest.keyClick(overlay, Qt.Key_V, Qt.ControlModifier)
+        press_key(overlay, Qt.Key_V, Qt.ControlModifier)
         wait_for(lambda: target.pasted is not None, 2000)
         pasted = target.pasted
         dpr = QGuiApplication.primaryScreen().devicePixelRatio()

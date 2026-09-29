@@ -49,7 +49,7 @@ class FloatingToolbar(QFrame):
         self.save_button = icon_button(icons.tool_icon("save"), "Save as (Ctrl+S)")
         self.cancel_button = icon_button(icons.tool_icon("close"), "Cancel (Esc)")
         self.done_button = icon_button(icons.tool_icon("done"),
-                                       "Copy and close (Enter, or click outside the selection).\n"
+                                       "Copy and close (Space, Enter, or click outside the selection).\n"
                                        "Ctrl+V pastes it straight into the window you came from.")
         self.done_button.setStyleSheet("QToolButton { background: #2f7bff; } QToolButton:hover { background: #4a8cff; }")
         for button in (self.open_button, self.save_button, self.cancel_button, self.done_button):
@@ -291,7 +291,7 @@ class SelectionOverlay(QWidget):
         self.toolbar.done_button.clicked.connect(lambda: self._done("copy"))
         self.canvas.finishRequested.connect(lambda: self._done("copy"))
         self.toolbar.panel.install_shortcuts(self)
-        for key in ("Return", "Enter", "Ctrl+C"):
+        for key in ("Space", "Return", "Enter", "Ctrl+C"):
             QShortcut(QKeySequence(key), self, activated=lambda: self._done("copy"))
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: self._done("save"))
         # The paste you were about to do anyway: copy, close, and paste where you came from.

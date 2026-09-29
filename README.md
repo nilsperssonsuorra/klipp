@@ -51,7 +51,7 @@ After **Alt+Shift+S**, a toolbar appears under your selection:
 | Input | Action |
 |---|---|
 | **Ctrl+V** | Paste the area with your drawing into the window you were in |
-| Click outside the selection, Enter or Ctrl+C | Copy the area with your drawing and close |
+| Space, Enter, Ctrl+C or a click outside the selection | Copy the area with your drawing and close |
 | Ctrl+S | Copy, then save as PNG or JPG |
 | Esc | Cancel |
 | Window button | Continue in the editor window, drawing included |
