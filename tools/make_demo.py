@@ -33,7 +33,6 @@ from PySide6.QtGui import (
     QPolygonF,
     QRadialGradient,
 )
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from klipp import hotkeys, icons
@@ -159,7 +158,7 @@ def draw_composer(p, focused=False, attachment=None, text="", d=1.0):
         p.drawLine(QPointF(x, line.center().y() - 9), QPointF(x, line.center().y() + 9))
 
 
-def paint_desktop(d, posted=None, composer=None):
+def paint_desktop(d, posted=None, composer=None, posted_text="getting this, any idea?"):
     """The staged desktop: a terminal with a failed deploy next to a team chat.
     `posted` is the annotated capture, shown as a new chat message after sending.
     `composer` holds the message box state: focused, attachment, text."""
@@ -203,7 +202,7 @@ def paint_desktop(d, posted=None, composer=None):
     y = CHAT.top() + 38 + 22
     y = chat_message(p, y, "Sam", "#f0883e", ["is the prod deploy done?", "customers keep asking about the new checkout"])
     if posted is not None:
-        chat_message(p, y, "You", "#2f7bff", ["getting this, any idea?"], posted, d)
+        chat_message(p, y, "You", "#2f7bff", [posted_text], posted, d)
     global CHAT_INPUT
     CHAT_INPUT = QRectF(CHAT.left() + 16, CHAT.bottom() - 66, CHAT.width() - 32, 48)
     draw_composer(p, d=d, **(composer or {}))
@@ -219,13 +218,15 @@ class Recorder:
         self.d = d
         self.frames = []
 
-    def frame(self, layers, cursor=None, badge=None, caption=None, repeat=1):
+    def frame(self, layers, cursor=None, badge=None, caption=None, repeat=1, extra=None):
         img = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
         img.setDevicePixelRatio(self.d)
         p = QPainter(img)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
         for pm, pos in layers:
             p.drawPixmap(QPointF(*pos), pm)
+        if extra:
+            extra(p)  # e.g. the stopwatch or the end card
         if caption:
             draw_caption(p, caption)
         if badge:
@@ -433,98 +434,195 @@ def hand_circle(rect, points=34):
     return out
 
 
+def draw_stopwatch(p, seconds, done=False):
+    """Small timer in the top-right corner: runs from the hotkey until the paste."""
+    color = QColor("#5ad17a") if done else QColor("#ffffff")
+    rect = QRectF(W - 150, 14, 132, 44)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(15, 16, 20, 225))
+    p.drawRoundedRect(rect, 22, 22)
+    c = QPointF(rect.left() + 26, rect.center().y() + 1)
+    p.setPen(QPen(color, 2.2))
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(c, 10, 10)
+    p.drawLine(QPointF(c.x(), c.y() - 13), QPointF(c.x(), c.y() - 16))
+    angle = math.radians(-90 + 360 * (seconds % 1))
+    p.drawLine(c, QPointF(c.x() + 7 * math.cos(angle), c.y() + 7 * math.sin(angle)))
+    p.setPen(color)
+    p.setFont(font(16, QFont.DemiBold))
+    p.drawText(QRectF(rect.left() + 44, rect.top(), 80, rect.height()), Qt.AlignVCenter, f"{seconds:.1f} s")
+
+
+def draw_end_card(p, seconds, fade=1.0):
+    p.fillRect(QRectF(0, 0, W, H), QColor(10, 11, 14, round(225 * fade)))
+    if fade < 1:
+        return
+    p.setPen(QColor("#ffffff"))
+    p.setFont(font(34, QFont.Bold))
+    p.drawText(QRectF(0, H / 2 - 150, W, 60), Qt.AlignCenter, f"Error to teammate in {seconds:.1f} seconds")
+    # The four steps as keycaps / labels.
+    steps = ["Alt + Shift + S", "drag", "draw", "Ctrl + V"]
+    p.setFont(font(17, QFont.DemiBold))
+    metrics = QFontMetrics(p.font())
+    widths = [metrics.horizontalAdvance(s) + 40 for s in steps]
+    arrow = 44
+    x = (W - sum(widths) - arrow * (len(steps) - 1)) / 2
+    y = H / 2 - 40
+    for i, (step, w) in enumerate(zip(steps, widths)):
+        cap = QRectF(x, y, w, 50)
+        p.setPen(QPen(QColor("#5a5d66"), 1.5))
+        p.setBrush(QColor("#2b2d33"))
+        p.drawRoundedRect(cap, 10, 10)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(cap, Qt.AlignCenter, step)
+        x += w
+        if i < len(steps) - 1:
+            p.setPen(QColor("#8a8d94"))
+            p.drawText(QRectF(x, y, arrow, 50), Qt.AlignCenter, "→")
+            x += arrow
+    p.setPen(QColor("#b8b8b8"))
+    p.setFont(font(16))
+    p.drawText(QRectF(0, H / 2 + 40, W, 40), Qt.AlignCenter, "No app window. No saving. No file picker.")
+    p.setPen(QColor("#ffffff"))
+    p.setFont(font(22, QFont.DemiBold))
+    p.drawText(QRectF(0, H / 2 + 110, W, 50), Qt.AlignCenter, "Klipp")
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Klipp")
     d = QGuiApplication.primaryScreen().devicePixelRatio()
     DOCS.mkdir(exist_ok=True)
-    desktop = paint_desktop(d, composer={"focused": True})
     rec = Recorder(d)
+    clock = {"start": None, "stopped": None}
 
-    # 1) Alt+Shift+S and drag over the error. The frozen screen stays up for drawing.
+    def elapsed():
+        if clock["start"] is None:
+            return None
+        end = clock["stopped"] if clock["stopped"] is not None else len(rec.frames)
+        return (end - clock["start"]) / FPS
+
+    def timer_layer(p):
+        seconds = elapsed()
+        if seconds is not None:
+            draw_stopwatch(p, seconds, done=clock["stopped"] is not None)
+
+    def shoot(layers, cursor=None, badge=None, repeat=1):
+        for _ in range(repeat):
+            rec.frame(layers, cursor, badge=badge, extra=timer_layer)
+
+    # 0) You're writing in the team chat when the deploy fails.
+    message = "deploy failed again, look:"
+    typing_at = (CHAT_INPUT.right() - 50, CHAT_INPUT.center().y())
+    for n in range(0, len(message) + 1, 2):
+        shoot([(paint_desktop(d, composer={"focused": True, "text": message[:n]}), (0, 0))], ("ibeam", typing_at))
+    desktop = paint_desktop(d, composer={"focused": True, "text": message})
+    shoot([(desktop, (0, 0))], ("ibeam", typing_at), repeat=4)
+
+    # 1) Alt+Shift+S: the stopwatch starts and the screen freezes.
     config = Config(json.loads(json.dumps(DEFAULTS)))
     config.save = lambda keys: None
+    config["snap_shapes"] = False  # quick hand-drawn marks, released straight away
     overlay = SelectionOverlay(QGuiApplication.primaryScreen(), desktop, 45, True, draw_config=config)
     overlay.setGeometry(0, 0, W, H)
     off_screen(overlay)
     result = {}
-    overlay.annotated.connect(lambda image, rect, action: result.update(image=image, rect=rect))
+    overlay.annotated.connect(lambda image, rect, action: result.update(image=image))
+    keys = ["Alt", "Shift", "S"]
+    clock["start"] = len(rec.frames)
+    shoot([(overlay.grab(), (0, 0))], ("ibeam", typing_at), badge=keys, repeat=3)
+
+    def frame(cursor, badge=None, repeat=1):
+        shoot([(overlay.grab(), (0, 0))], cursor, badge=badge, repeat=repeat)
+
     start = (TERMINAL.left() + 4, LINE_RECTS[3].top() - 8)
-    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 21)
-    select_area(rec, overlay, desktop, ["Alt", "Shift", "S"], start, end, cursor=(720, 470))
-    canvas = overlay.canvas
-    vp = canvas.viewport()  # covers the whole overlay, so its coordinates are frame coordinates
+    # Extra room on the right, inside the capture, for the arrow.
+    end = (max(r.right() for r in LINE_RECTS[3:9]) + 190, LINE_RECTS[8].bottom() + 21)
+    for i in range(6):
+        pos = lerp(typing_at, start, (i + 1) / 6)
+        send_mouse(overlay, QEvent.MouseMove, pos)
+        frame(("cross", pos), badge=keys if i < 3 else None)
+    send_mouse(overlay, QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton)
+    for i in range(10):
+        pos = lerp(start, end, (i + 1) / 10)
+        send_mouse(overlay, QEvent.MouseMove, pos, Qt.NoButton, Qt.LeftButton)
+        frame(("cross", pos))
+    send_mouse(overlay, QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton)
+    QApplication.processEvents()
+    canvas, panel = overlay.canvas, overlay.toolbar.panel
+    vp = canvas.viewport()
 
-    def frame(cursor, caption=None, badge=None, repeat=1):
-        rec.frame([(overlay.grab(), (0, 0))], cursor, badge=badge, caption=caption, repeat=repeat)
+    def brush():
+        return canvas.size_for(canvas.tool) * canvas.zoom
 
-    def brush(tool=None):
-        return canvas.size_for(tool or canvas.tool) * canvas.zoom
+    def cursor_for(pos):
+        return ("brush", pos, brush()) if canvas.tool in ("pen", "highlighter") else ("cross", pos)
 
-    def stroke(points, caption=None, button=Qt.LeftButton, tool=None, badge=None, snap_caption=None):
-        """Draw through `points`. With snap_caption, rest at the end until the stroke snaps."""
-        send_mouse(vp, QEvent.MouseButtonPress, points[0], button, button)
-        for pt in points[1:]:
-            send_mouse(vp, QEvent.MouseMove, pt, Qt.NoButton, button)
-            frame(("brush", pt, brush(tool)), caption, badge=badge)
-        if snap_caption:
-            frame(("brush", points[-1], brush(tool)), snap_caption, badge=badge, repeat=8)  # the rough stroke, resting
-            QTest.qWait(600)  # the real snap timer
-            frame(("brush", points[-1], brush(tool)), snap_caption, badge=badge, repeat=14)
-        send_mouse(vp, QEvent.MouseButtonRelease, points[-1], button, Qt.NoButton)
+    def stroke(points, every=2):
+        send_mouse(vp, QEvent.MouseButtonPress, points[0], Qt.LeftButton, Qt.LeftButton)
+        for i, pt in enumerate(points[1:], 1):
+            send_mouse(vp, QEvent.MouseMove, pt, Qt.NoButton, Qt.LeftButton)
+            if i % every == 0 or i == len(points) - 1:
+                frame(cursor_for(pt))
+        send_mouse(vp, QEvent.MouseButtonRelease, points[-1], Qt.LeftButton, Qt.NoButton)
         return points[-1]
 
-    def move(a, b, frames, caption=None, tool=None, kind="brush"):
+    def move(a, b, frames, kind=None):
         for i in range(frames):
-            frame((kind, lerp(a, b, (i + 1) / frames), brush(tool)), caption)
+            pos = lerp(a, b, (i + 1) / frames)
+            frame((kind, pos) if kind else cursor_for(pos))
+        return b
 
-    # 2) A rough loop round the wrong line: pause, and it snaps into a clean ellipse...
-    frame(("arrow", end), repeat=6)
-    wrong = hand_circle(glyphs(5), points=26)
-    move(end, wrong[0], 6)
-    at = stroke(wrong, badge={"button": "left", "text": "Drag to draw"}, snap_caption="Pause, and it snaps into shape")
+    def click(button, at, frames=4):
+        center = button.mapTo(overlay, button.rect().center())
+        target = (center.x(), center.y())
+        move(at, target, frames, kind="arrow")
+        button.click()
+        frame(("arrow", target))
+        return target
 
-    # ...right-drag wipes the whole stroke...
-    caption = "Wrong line? Erase the whole stroke"
-    right_drag = {"button": "right", "text": "Right-drag"}
-    corner = (LINE_RECTS[5].left(), LINE_RECTS[5].center().y())  # sweep across the loop's left end
-    wipe = [(corner[0] - 44 + t * 6, corner[1] - 34 + t * 6) for t in range(9)]
-    move(at, wipe[0], 8, caption, tool="eraser")
-    canvas.update_cursor("eraser")
-    frame(("brush", wipe[0], brush("eraser")), caption, badge=right_drag, repeat=4)
-    at = stroke(wipe, caption, button=Qt.RightButton, tool="eraser", badge=right_drag)
-    frame(("brush", at, brush("eraser")), caption, badge=right_drag, repeat=8)
+    # 2) Circle the call that failed, highlight the error, point at the timeout.
+    loop = hand_circle(glyphs(5), points=26)
+    at = move(end, loop[0], 4)
+    at = stroke(loop)
+    at = click(panel.tool_buttons["highlighter"], at)
+    at = click(panel.swatches[2], at, frames=3)  # yellow
+    error = glyphs(8)
+    mark = [(error.left() - 4 + t * (error.width() + 8) / 12, error.center().y()) for t in range(13)]
+    at = move(at, mark[0], 4)
+    at = stroke(mark, every=2)
+    at = click(panel.tool_buttons["arrow"], at)
+    timeout = phrase_rect(7, "timeout=30")
+    tip = (timeout.right() + 8, timeout.center().y())
+    tail = (tip[0] + 150, tip[1] - 34)
+    arrow = [lerp(tail, tip, t / 8) for t in range(9)]
+    at = move(at, arrow[0], 4, kind="cross")
+    at = stroke(arrow, every=1)
+    frame(("arrow", at), repeat=2)
 
-    # ...pick yellow in the toolbar and loop the real error.
-    swatch = overlay.toolbar.panel.swatches[2]  # yellow: stands out on the red error text
-    center = swatch.mapTo(overlay, swatch.rect().center())
-    button = (center.x(), center.y())
-    move(at, button, 10, kind="arrow")
-    swatch.click()
-    frame(("arrow", button), repeat=5)
-    right = hand_circle(glyphs(8), points=34)
-    move(button, right[0], 8)
-    at = stroke(right, snap_caption="Pause, and it snaps into shape")
-    frame(("arrow", at), repeat=6)
-
-    # 3) Ctrl+V: the frozen screen goes away and the capture lands in the chat you were typing in.
-    frame(("arrow", at), badge=["Ctrl", "V"], repeat=8)
+    # 3) Ctrl+V: the stopwatch stops, the capture is in the message box.
+    frame(("arrow", at), badge=["Ctrl", "V"], repeat=2)
     overlay._done("paste")
+    clock["stopped"] = len(rec.frames)
     posted = QPixmap.fromImage(result["image"])
     posted.setDevicePixelRatio(d)
 
-    def chat(repeat=1, cursor=None, badge=None, caption=None, **composer):
-        rec.frame([(paint_desktop(d, composer.pop("posted", None), composer), (0, 0))],
-                  cursor, badge=badge, caption=caption, repeat=repeat)
+    def chat(repeat=1, badge=None, **composer):
+        sent = composer.pop("posted", None)
+        layer = paint_desktop(d, sent, composer, posted_text=message)
+        shoot([(layer, (0, 0))], ("arrow", at), badge=badge, repeat=repeat)
 
-    chat(8, ("arrow", at), badge=["Ctrl", "V"], focused=True, attachment=posted)
-    chat(10, ("arrow", at), caption="Pasted where you were typing", focused=True, attachment=posted)
-    message = "getting this, any idea?"
-    for n in range(2, len(message) + 2, 2):
-        chat(1, ("arrow", at), focused=True, attachment=posted, text=message[:n])
-    chat(6, ("arrow", at), focused=True, attachment=posted, text=message)
-    chat(6, ("arrow", at), badge=["Enter"], focused=True, attachment=posted, text=message)
-    chat(50, ("arrow", at), caption="Sent. No saving, no file picker.", focused=True, posted=posted)
+    chat(6, badge=["Ctrl", "V"], focused=True, attachment=posted, text=message)
+    chat(6, focused=True, attachment=posted, text=message)
+    chat(5, badge=["Enter"], focused=True, attachment=posted, text=message)
+    chat(22, focused=True, posted=posted)
+
+    # 4) End card.
+    seconds = elapsed()
+    final = paint_desktop(d, posted, {"focused": True}, posted_text=message)
+    for i in range(4):
+        rec.frame([(final, (0, 0))], extra=lambda p, f=(i + 1) / 5: draw_end_card(p, seconds, fade=f))
+    rec.frame([(final, (0, 0))], extra=lambda p: draw_end_card(p, seconds), repeat=60)
 
     # --- encode ------------------------------------------------------------------
     tmp = Path(tempfile.mkdtemp(prefix="klipp-demo-"))
