@@ -36,13 +36,12 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QApplication
 
 from klipp import icons
-from klipp.app import Toast
 from klipp.config import DEFAULTS, Config
 from klipp.editor import EditorWindow
 from klipp.overlay import SelectionOverlay
 from klipp.settings import SettingsDialog
 
-W, H = 1360, 820  # logical size of the staged desktop
+W, H = 1280, 720  # logical size of the staged desktop
 FPS = 20
 OUT_WIDTH = 1200
 DOCS = ROOT / "docs"
@@ -56,12 +55,82 @@ def font(size, weight=QFont.Normal):
 
 # --- staged desktop ---------------------------------------------------------------
 
+TERMINAL = QRectF(24, 40, 800, 400)
+CHAT = QRectF(848, 40, 408, 640)
+TERMINAL_LINES = [
+    ("PS C:\\projects\\shop> python deploy.py --env prod", "#8ae28a"),
+    ("Building frontend... done (4.2s)", "#c9ccd3"),
+    ("Uploading 214 files to api.internal", "#c9ccd3"),
+    ("Traceback (most recent call last):", "#c9ccd3"),
+    ('  File "deploy.py", line 42, in <module>', "#8f96a3"),
+    ("    upload(build_dir)", "#c9ccd3"),
+    ('  File "deploy.py", line 17, in upload', "#8f96a3"),
+    ("    client.put(path, data, timeout=30)", "#c9ccd3"),
+    ("ConnectionError: timed out after 30s (host: api.internal)", "#ff6b6b"),
+    ("PS C:\\projects\\shop> ", "#8ae28a"),
+]
+LINE_RECTS = []  # visible text of each terminal line, filled in by paint_desktop
+CHAT_INPUT = QRectF()
 
-def paint_desktop(d):
+
+def draw_window(p, rect, title, body, bar, text):
+    p.setPen(Qt.NoPen)
+    for i in range(14, 0, -2):
+        p.setBrush(QColor(0, 0, 0, 9))
+        p.drawRoundedRect(rect.adjusted(-i, -i + 8, i, i + 8), 10 + i, 10 + i)
+    p.setBrush(QColor(body))
+    p.drawRoundedRect(rect, 10, 10)
+    title_bar = QRectF(rect.left(), rect.top(), rect.width(), 38)
+    path = QPainterPath()
+    path.addRoundedRect(title_bar, 10, 10)
+    path.addRect(title_bar.adjusted(0, 19, 0, 0))
+    p.fillPath(path.simplified(), QColor(bar))
+    p.setPen(QColor(text))
+    p.setFont(font(9))
+    p.drawText(title_bar.adjusted(16, 0, 0, 0), Qt.AlignVCenter, title)
+    for i, glyph in enumerate(("—", "☐", "✕")):
+        p.drawText(QRectF(rect.right() - 138 + i * 46, rect.top(), 46, 38), Qt.AlignCenter, glyph)
+
+
+def chat_message(p, y, name, color, lines, image=None, d=1.0):
+    left = CHAT.left() + 18
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    p.drawEllipse(QRectF(left, y, 36, 36))
+    p.setPen(QColor("#ffffff"))
+    p.setFont(font(10, QFont.DemiBold))
+    p.drawText(QRectF(left, y, 36, 36), Qt.AlignCenter, name[0])
+    p.drawText(QPointF(left + 50, y + 14), name)
+    p.setPen(QColor("#949ba4"))
+    p.setFont(font(8))
+    p.drawText(QPointF(left + 52 + QFontMetrics(font(10, QFont.DemiBold)).horizontalAdvance(name), y + 14), "10:21")
+    p.setPen(QColor("#dbdee1"))
+    p.setFont(font(10))
+    ty = y + 36
+    for line in lines:
+        p.drawText(QPointF(left + 50, ty), line)
+        ty += 22
+    if image is not None:
+        w = min(CHAT.width() - 86, image.width() / d)
+        h = image.height() / d * w / (image.width() / d)
+        target = QRectF(left + 50, ty - 12, w, h)
+        clip = QPainterPath()
+        clip.addRoundedRect(target, 8, 8)
+        p.save()
+        p.setClipPath(clip)
+        p.drawPixmap(target, image, QRectF(image.rect()))
+        p.restore()
+        ty += h + 4
+    return ty + 14
+
+
+def paint_desktop(d, posted=None):
+    """The staged desktop: a terminal with a failed deploy next to a team chat.
+    `posted` is the annotated capture, shown as a new chat message after the paste."""
     pm = QPixmap(int(W * d), int(H * d))
     pm.setDevicePixelRatio(d)
     p = QPainter(pm)
-    p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+    p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing | QPainter.SmoothPixmapTransform)
 
     wall = QLinearGradient(0, 0, W, H)
     wall.setColorAt(0, QColor("#18243f"))
@@ -75,77 +144,37 @@ def paint_desktop(d):
         glow.setColorAt(1, QColor(0, 0, 0, 0))
         p.fillRect(QRectF(0, 0, W, H), glow)
 
-    # A dashboard window to screenshot.
-    win = QRectF(90, 30, 1180, 720)
-    p.setPen(Qt.NoPen)
-    for i in range(12):
-        p.setBrush(QColor(0, 0, 0, 10))
-        p.drawRoundedRect(win.adjusted(-i, -i + 6, i, i + 6), 10 + i, 10 + i)
-    p.setBrush(QColor("#ffffff"))
-    p.drawRoundedRect(win, 10, 10)
-    title = QRectF(win.left(), win.top(), win.width(), 38)
-    path = QPainterPath()
-    path.addRoundedRect(title, 10, 10)
-    path.addRect(title.adjusted(0, 19, 0, 0))
-    p.fillPath(path.simplified(), QColor("#f1f2f4"))
-    p.setPen(QColor("#444"))
-    p.setFont(font(9))
-    p.drawText(title.adjusted(16, 0, 0, 0), Qt.AlignVCenter, "Q3 Report — Sales Dashboard")
-    for i, glyph in enumerate(("—", "☐", "✕")):
-        p.drawText(QRectF(win.right() - 138 + i * 46, win.top(), 46, 38), Qt.AlignCenter, glyph)
-
-    left, top = win.left() + 40, win.top() + 70
-    p.setPen(QColor("#15171c"))
-    p.setFont(font(20, QFont.DemiBold))
-    p.drawText(QPointF(left, top + 18), "Revenue by region")
-    p.setPen(QColor("#6b7280"))
-    p.setFont(font(10))
-    p.drawText(QPointF(left, top + 44), "July – September, in thousands of USD")
-
-    # Bar chart.
-    chart = QRectF(left, top + 80, 640, 380)
-    p.setPen(QPen(QColor("#e5e7eb"), 1))
-    for i in range(5):
-        y = chart.bottom() - i * chart.height() / 4
-        p.drawLine(QPointF(chart.left(), y), QPointF(chart.right(), y))
-    bars = [("North", 420), ("South", 360), ("East", 510), ("West", 300), ("Online", 880), ("Retail", 470)]
-    slot = chart.width() / len(bars)
-    for i, (name, value) in enumerate(bars):
-        h = chart.height() * value / 1000
-        x = chart.left() + i * slot + slot * 0.2
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#2f7bff" if name != "Online" else "#1f5fd6"))
-        p.drawRoundedRect(QRectF(x, chart.bottom() - h, slot * 0.6, h), 4, 4)
-        p.setPen(QColor("#374151"))
-        p.setFont(font(9, QFont.DemiBold))
-        p.drawText(QRectF(x - 10, chart.bottom() - h - 24, slot * 0.6 + 20, 20), Qt.AlignCenter, str(value))
-        p.setPen(QColor("#6b7280"))
-        p.setFont(font(9))
-        p.drawText(QRectF(x - 10, chart.bottom() + 8, slot * 0.6 + 20, 20), Qt.AlignCenter, name)
-
-    # KPI cards.
-    cards = [("Total revenue", "$2.94M", "▲ 12% vs Q2", "#16a34a"),
-             ("New customers", "1,284", "▲ 8% vs Q2", "#16a34a"),
-             ("Churn", "2.1%", "▼ 0.4 pts", "#dc2626")]
-    for i, (label, value, delta, color) in enumerate(cards):
-        card = QRectF(left + 700, top + 80 + i * 128, 380, 108)
-        p.setPen(QPen(QColor("#e5e7eb"), 1))
-        p.setBrush(QColor("#fafafa"))
-        p.drawRoundedRect(card, 8, 8)
-        p.setPen(QColor("#6b7280"))
-        p.setFont(font(10))
-        p.drawText(QPointF(card.left() + 20, card.top() + 32), label)
-        p.setPen(QColor("#111827"))
-        p.setFont(font(22, QFont.DemiBold))
-        p.drawText(QPointF(card.left() + 20, card.top() + 74), value)
+    # Terminal with a failed deploy.
+    draw_window(p, TERMINAL, "Windows PowerShell", "#1b1c21", "#26272d", "#c9ccd3")
+    mono = QFont("Consolas", 14)
+    metrics = QFontMetrics(mono)
+    p.setFont(mono)
+    LINE_RECTS.clear()
+    x, baseline = TERMINAL.left() + 22, TERMINAL.top() + 38 + 34
+    for text, color in TERMINAL_LINES:
         p.setPen(QColor(color))
-        p.setFont(font(10, QFont.DemiBold))
-        p.drawText(QPointF(card.left() + 210, card.top() + 74), delta)
+        p.drawText(QPointF(x, baseline), text)
+        indent = metrics.horizontalAdvance(text[: len(text) - len(text.lstrip())])
+        LINE_RECTS.append(QRectF(x + indent, baseline - metrics.ascent(),
+                                 metrics.horizontalAdvance(text.strip()), metrics.height()))
+        baseline += 31
+    p.fillRect(QRectF(LINE_RECTS[-1].right() + 2, LINE_RECTS[-1].top() + 2, 10, metrics.height() - 4),
+               QColor("#c9ccd3"))
 
-    p.setPen(QColor("#4b5563"))
+    # Team chat.
+    draw_window(p, CHAT, "#deploys  ·  Team chat", "#313338", "#2b2d31", "#dbdee1")
+    y = CHAT.top() + 38 + 22
+    y = chat_message(p, y, "Sam", "#f0883e", ["is the prod deploy done?", "customers keep asking about the new checkout"])
+    if posted is not None:
+        chat_message(p, y, "You", "#2f7bff", ["getting this, any idea?"], posted, d)
+    global CHAT_INPUT
+    CHAT_INPUT = QRectF(CHAT.left() + 16, CHAT.bottom() - 66, CHAT.width() - 32, 48)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#383a40"))
+    p.drawRoundedRect(CHAT_INPUT, 8, 8)
+    p.setPen(QColor("#80848e"))
     p.setFont(font(10))
-    p.drawText(QPointF(left, top + 520), "Online sales grew 38% after the spring campaign, while West lagged behind")
-    p.drawText(QPointF(left, top + 544), "due to the store renovation in August. Retail is back on track for Q4.")
+    p.drawText(CHAT_INPUT.adjusted(16, 0, 0, 0), Qt.AlignVCenter, "Message #deploys")
     p.end()
     return pm
 
@@ -178,7 +207,7 @@ class Recorder:
 def draw_caption(p, text):
     p.setFont(font(15, QFont.DemiBold))
     w = QFontMetrics(p.font()).horizontalAdvance(text) + 48
-    rect = QRectF((W - w) / 2, 22, w, 50)
+    rect = QRectF((W - w) / 2, 6, w, 46)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(15, 16, 20, 225))
     p.drawRoundedRect(rect, 25, 25)
@@ -281,57 +310,53 @@ def off_screen(widget):
 # --- storyboard -------------------------------------------------------------------
 
 
-def select_area(rec, desktop, keys, start, end, caption=None):
-    """Hotkey badge, frozen overlay, drag a selection. Returns (crop, rect)."""
+def select_area(rec, desktop, keys, start, end, cursor):
+    """Hotkey badge, frozen overlay, drag a selection. Returns the cropped capture."""
     overlay = SelectionOverlay(QGuiApplication.primaryScreen(), desktop, 45, True)
     overlay.setGeometry(0, 0, W, H)
     off_screen(overlay)
     result = {}
-    overlay.selected.connect(lambda crop, rect: result.update(crop=crop, rect=rect))
+    overlay.selected.connect(lambda crop, rect: result.update(crop=crop))
 
-    cursor = (1150, 700)
+    rec.frame([(desktop, (0, 0))], ("arrow", cursor), badge=keys, repeat=6)
     for i in range(8):
-        rec.frame([(desktop, (0, 0))], ("arrow", cursor), badge=keys, caption=caption)
-    for i in range(14):
-        pos = lerp(cursor, start, (i + 1) / 14)
+        pos = lerp(cursor, start, (i + 1) / 8)
         send_mouse(overlay, QEvent.MouseMove, pos)
-        rec.frame([(overlay.grab(), (0, 0))], ("cross", pos), badge=keys if i < 6 else None, caption=caption)
+        rec.frame([(overlay.grab(), (0, 0))], ("cross", pos), badge=keys if i < 4 else None)
     send_mouse(overlay, QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton)
-    for i in range(18):
-        pos = lerp(start, end, (i + 1) / 18)
+    for i in range(12):
+        pos = lerp(start, end, (i + 1) / 12)
         send_mouse(overlay, QEvent.MouseMove, pos, Qt.NoButton, Qt.LeftButton)
-        rec.frame([(overlay.grab(), (0, 0))], ("cross", pos), caption=caption)
-    rec.frame([(overlay.grab(), (0, 0))], ("cross", end), caption=caption, repeat=6)
+        rec.frame([(overlay.grab(), (0, 0))], ("cross", pos))
+    rec.frame([(overlay.grab(), (0, 0))], ("cross", end), repeat=3)
     send_mouse(overlay, QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton)
     QApplication.processEvents()
-    return result["crop"], result["rect"]
+    return result["crop"]
+
+
+def ellipse_around(rect, pad_x, pad_y, points=26):
+    cx, cy = rect.center().x(), rect.center().y()
+    rx, ry = rect.width() / 2 + pad_x, rect.height() / 2 + pad_y
+    return [(cx + rx * math.cos(a), cy + ry * math.sin(a))
+            for a in (math.radians(-110 + t * 375 / (points - 1)) for t in range(points))]
 
 
 def main():
     app = QApplication(sys.argv)
+    app.setApplicationName("Klipp")
     d = QGuiApplication.primaryScreen().devicePixelRatio()
     DOCS.mkdir(exist_ok=True)
     desktop = paint_desktop(d)
     rec = Recorder(d)
-    app.setApplicationName("Klipp")
 
     # Keep the demo away from the real clipboard.
     EditorWindow.copy_to_clipboard = lambda self: (self.copied_label.setText("✓ Copied"), self._flash.start())
 
-    # 1) Alt+S: straight to the clipboard.
-    caption = "Alt+S  →  drag an area  →  it's on your clipboard"
-    _, rect = select_area(rec, desktop, ["Alt", "S"], (815, 166), (1225, 556), caption)
-    toast = Toast("✓ Copied to clipboard", QPoint(rect.center().x(), rect.bottom()))
-    off_screen(toast)
-    toast.move(int(rect.center().x() - toast.width() / 2), rect.bottom() + 12)
-    for i in range(26):
-        rec.frame([(desktop, (0, 0)), (toast.grab(), (toast.x(), toast.y()))], ("arrow", (1225, 556)), caption=caption)
-    for i in range(6):
-        rec.frame([(desktop, (0, 0))], ("arrow", (1225, 556)))
+    # 1) Alt+Shift+S and drag over the error.
+    start = (TERMINAL.left() + 12, LINE_RECTS[3].top() - 4)
+    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 8)
+    crop = select_area(rec, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
 
-    # 2) Alt+Shift+S: capture and draw.
-    caption = "Alt+Shift+S  →  drag an area  →  draw on it"
-    crop, rect = select_area(rec, desktop, ["Alt", "Shift", "S"], (112, 78), (828, 660), caption)
     config = Config(json.loads(json.dumps(DEFAULTS)))
     config.save = lambda keys: None
     editor = EditorWindow(crop, d, config)
@@ -339,95 +364,75 @@ def main():
     off_screen(editor)
     editor.canvas.fit()
     QApplication.processEvents()
+    vp = editor.canvas.viewport()
 
     def editor_layers():
         pm, (cx, cy) = window_chrome(editor.grab(), editor.windowTitle(), d)
-        ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2
+        ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2 - 40
         return [(desktop, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
 
-    layers, origin = editor_layers()
-    vp = editor.canvas.viewport()
+    def to_frame(vp_pos):
+        _, origin = editor_layers()
+        off = vp.mapTo(editor, QPoint(0, 0))
+        return (origin[0] + off.x() + vp_pos[0], origin[1] + off.y() + vp_pos[1])
 
-    def to_frame(widget_pos, widget=vp):
-        off = widget.mapTo(editor, QPoint(0, 0))
-        return (origin[0] + off.x() + widget_pos[0], origin[1] + off.y() + widget_pos[1])
-
-    def brush():
-        return editor.canvas.size_for(editor.canvas.tool) * editor.canvas.zoom
-
-    def image_to_vp(x, y):
-        """Position in the captured image (logical px) -> viewport coords."""
+    def to_vp(desktop_pos):
+        """A point on the staged desktop -> the same spot in the editor's viewport."""
+        x, y = desktop_pos[0] - start[0], desktop_pos[1] - start[1]
         pt = editor.canvas.mapFromScene(QPointF(x * d, y * d))
         return (pt.x(), pt.y())
 
-    def stroke(points, caption, button=Qt.LeftButton, kind="brush", frames_per_point=1):
+    def frame(cursor, caption=None, badge=None, repeat=1):
+        layers, _ = editor_layers()
+        rec.frame(layers, cursor, badge=badge, caption=caption, repeat=repeat)
+
+    def brush(tool=None):
+        return editor.canvas.size_for(tool or editor.canvas.tool) * editor.canvas.zoom
+
+    def stroke(points, caption=None, button=Qt.LeftButton, tool=None):
+        points = [to_vp(pt) for pt in points]
         send_mouse(vp, QEvent.MouseButtonPress, points[0], button, button)
         for pt in points[1:]:
             send_mouse(vp, QEvent.MouseMove, pt, Qt.NoButton, button)
-            layers, _ = editor_layers()
-            rec.frame(layers, (kind, to_frame(pt), brush()), caption=caption, repeat=frames_per_point)
+            frame(("brush", to_frame(pt), brush(tool)), caption)
         send_mouse(vp, QEvent.MouseButtonRelease, points[-1], button, Qt.NoButton)
+        return to_frame(points[-1])
 
-    def move_cursor(a, b, caption, frames=10, kind="arrow"):
+    def move(a, b, frames, caption=None, tool=None):
         for i in range(frames):
-            layers, _ = editor_layers()
-            rec.frame(layers, (kind, lerp(a, b, (i + 1) / frames), brush()), caption=caption)
+            frame(("brush", lerp(a, b, (i + 1) / frames), brush(tool)), caption)
 
-    def click(button, caption, at):
-        center = button.rect().center()
-        target = to_frame((center.x(), center.y()), button)
-        move_cursor(at, target, caption)
-        button.click()
-        layers, _ = editor_layers()
-        rec.frame(layers, ("arrow", target), caption=caption, repeat=4)
-        return target
+    # 2) Circle the wrong line by mistake...
+    frame(("arrow", end), repeat=3)
+    wrong = ellipse_around(LINE_RECTS[5], 16, 9, points=22)
+    move(end, to_frame(to_vp(wrong[0])), 6)
+    at = stroke(wrong)
 
-    for i in range(10):
-        layers, _ = editor_layers()
-        rec.frame(layers, ("arrow", (828, 660)), caption=caption)
-
-    # Positions below are in the captured image (logical px from its top-left corner):
-    # the Online bar is centred at x=498 with its top at y=148; the title's baseline is y=40.
-    caption = "Circle what matters"
-    cx, cy, rx, ry = 498, 160, 60, 42
-    circle = [image_to_vp(cx + rx * math.cos(a), cy + ry * math.sin(a))
-              for a in (math.radians(-100 + t * 12.5) for t in range(32))]
-    move_cursor((828, 660), to_frame(circle[0]), caption, frames=10, kind="brush")
-    stroke(circle, caption)
-
-    caption = "Pick a tool and a color with one click"
-    at = click(editor.tool_buttons["arrow"], caption, to_frame(circle[-1]))
-    at = click(editor.swatches[5], caption, at)  # blue
-    arrow = [image_to_vp(700 - t * 13.5, 300 - t * 9.4) for t in range(12)]  # ends just outside the circle
-    move_cursor(at, to_frame(arrow[0]), caption, kind="cross")
-    stroke(arrow, caption, kind="cross", frames_per_point=1)
-
-    at = click(editor.tool_buttons["highlighter"], caption, to_frame(arrow[-1]))
-    at = click(editor.swatches[2], caption, at)  # yellow
-    mark = [image_to_vp(18 + t * 12, 30) for t in range(20)]  # across the title
-    move_cursor(at, to_frame(mark[0]), caption, kind="brush")
-    stroke(mark, caption)
-
-    caption = "Hold right-click to erase a whole stroke"
-    wipe = [image_to_vp(470 + t * 4, 100 + t * 2.5) for t in range(16)]  # through the top of the circle
-    move_cursor(to_frame(mark[-1]), to_frame(wipe[0]), caption, kind="brush")
+    # ...right-drag wipes the whole stroke...
+    caption = "Wrong line? Right-drag erases the whole stroke"
+    left_edge = (LINE_RECTS[5].left() - 16, LINE_RECTS[5].center().y())
+    wipe = [(left_edge[0] - 6 + t * 2, left_edge[1] - 26 + t * 7) for t in range(9)]
+    move(at, to_frame(to_vp(wipe[0])), 6, caption, tool="eraser")
     editor.canvas.update_cursor("eraser")
-    stroke(wipe, caption, button=Qt.RightButton)
-    layers, _ = editor_layers()
-    rec.frame(layers, ("brush", to_frame(wipe[-1]), brush()), caption=caption, repeat=10)
+    at = stroke(wipe, caption, button=Qt.RightButton, tool="eraser")
+    frame(("brush", at, brush("eraser")), caption, repeat=6)
 
-    caption = "Changed your mind? Ctrl+Z"
-    layers, _ = editor_layers()
-    rec.frame(layers, ("arrow", to_frame(wipe[-1])), badge=["Ctrl", "Z"], caption=caption, repeat=6)
-    editor.canvas.undo_stack.undo()
+    # ...and circle the real error.
+    right = ellipse_around(LINE_RECTS[8], 18, 5, points=28)
+    move(at, to_frame(to_vp(right[0])), 6)
+    at = stroke(right)
     editor.copy_to_clipboard()
-    layers, _ = editor_layers()
-    rec.frame(layers, ("arrow", to_frame(wipe[-1])), badge=["Ctrl", "Z"], caption=caption, repeat=14)
+    frame(("arrow", at), repeat=10)
 
-    caption = "Everything you draw is already on your clipboard"
-    editor.copy_to_clipboard()
-    layers, _ = editor_layers()
-    rec.frame(layers, ("arrow", to_frame(wipe[-1])), caption=caption, repeat=40)
+    # 3) Paste into the chat. The editor copied it already.
+    target = (CHAT_INPUT.left() + 150, CHAT_INPUT.center().y())
+    for i in range(10):
+        rec.frame([(desktop, (0, 0))], ("arrow", lerp(at, target, (i + 1) / 10)))
+    rec.frame([(desktop, (0, 0))], ("arrow", target), badge=["Ctrl", "V"], repeat=8)
+    posted = QPixmap.fromImage(editor.canvas.render_image())
+    posted.setDevicePixelRatio(d)
+    after = paint_desktop(d, posted)
+    rec.frame([(after, (0, 0))], ("arrow", target), caption="Pasted. It was already on your clipboard.", repeat=44)
 
     # --- encode ------------------------------------------------------------------
     tmp = Path(tempfile.mkdtemp(prefix="klipp-demo-"))
@@ -436,7 +441,7 @@ def main():
     gif = DOCS / "demo.gif"
     subprocess.run([
         "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(FPS), "-i", str(tmp / "f%04d.png"),
-        "-vf", f"scale={OUT_WIDTH}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];"
+        "-vf", f"scale={OUT_WIDTH}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=160:stats_mode=diff[p];"
                "[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
         "-loop", "0", str(gif),
     ], check=True)

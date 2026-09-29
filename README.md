@@ -1,8 +1,10 @@
 # Klipp
 
-Klipp is a screenshot tool for Windows. Press a hotkey, drag over part of the screen, and the image is on your clipboard. A second hotkey opens the capture in an editor where you can draw on it before pasting.
+**Alt+Shift+S, drag, draw, Ctrl+V.** Screenshots on Windows without opening an app or saving a file.
 
 ![Klipp demo](docs/demo.gif)
+
+**[Download Klipp for Windows](https://github.com/nilsperssonsuorra/klipp/releases/latest)**. Unzip it and run `Klipp.exe`. No installer, no account.
 
 ## What it does
 
@@ -13,11 +15,21 @@ Klipp is a screenshot tool for Windows. Press a hotkey, drag over part of the sc
 - Every change in the editor is copied to the clipboard right away, so you can paste at any point without pressing Copy.
 - Captures keep full resolution on high-DPI screens. A 4K screen at 150% scaling gives you 4K pixels.
 
-Klipp runs in the system tray and can start with Windows.
+Klipp runs in the system tray and starts with Windows. You can turn that off in Settings.
 
 ## Install
 
-Klipp has no installer yet. Build it from source with Python 3.12 on Windows 10 or 11:
+1. Download `Klipp-<version>-windows.zip` from the [latest release](https://github.com/nilsperssonsuorra/klipp/releases/latest).
+2. Unzip it wherever you want to keep it, for example `C:\Tools\Klipp`.
+3. Run `Klipp.exe`. It adds an icon to the system tray.
+
+Klipp isn't code-signed yet, so Windows SmartScreen may warn you the first time. Click **More info**, then **Run anyway**.
+
+To update, quit Klipp from the tray icon, replace the folder with the new version and start it again. Your settings are kept.
+
+### Build it yourself
+
+With Python 3.12 on Windows 10 or 11:
 
 ```powershell
 git clone https://github.com/nilsperssonsuorra/klipp.git
@@ -27,7 +39,7 @@ python -m venv .venv
 .\build.ps1
 ```
 
-This creates `dist\Klipp\Klipp.exe`. Start it once and it adds itself to the tray. Turn on **Start Klipp when Windows starts** in Settings to have it run at login. That option is on by default.
+This creates `dist\Klipp\Klipp.exe` and a release zip in `dist`.
 
 ## Using it
 
@@ -78,6 +90,8 @@ Settings are stored in `%APPDATA%\Klipp\config.json`. You can edit that file by 
 The smoke test drives the editor, the settings window and the capture flow with simulated input. It briefly shows the selection overlay on screen. It posts hotkey messages to Klipp directly, so no real key presses reach other programs.
 
 `make_demo.py` renders the README images off-screen using the real widgets on a staged desktop. It needs `ffmpeg` on your PATH.
+
+To publish a release, bump `__version__` in `klipp/__init__.py`, commit, then push a matching tag such as `v1.0.1`. GitHub Actions builds `Klipp.exe` and attaches the zip to a new release.
 
 Code layout:
 
