@@ -55,7 +55,7 @@ def font(size, weight=QFont.Normal):
 
 # --- staged desktop ---------------------------------------------------------------
 
-TERMINAL = QRectF(24, 40, 800, 400)
+TERMINAL = QRectF(24, 40, 800, 470)
 CHAT = QRectF(848, 40, 408, 640)
 TERMINAL_LINES = [
     ("PS C:\\projects\\shop> python deploy.py --env prod", "#8ae28a"),
@@ -71,6 +71,7 @@ TERMINAL_LINES = [
 ]
 LINE_RECTS = []  # visible text of each terminal line, filled in by paint_desktop
 CHAT_INPUT = QRectF()
+POSTED = QRectF()  # the pasted chat message, filled in by paint_desktop
 
 
 def draw_window(p, rect, title, body, bar, text):
@@ -111,6 +112,7 @@ def chat_message(p, y, name, color, lines, image=None, d=1.0):
         p.drawText(QPointF(left + 50, ty), line)
         ty += 22
     if image is not None:
+        global POSTED
         w = min(CHAT.width() - 86, image.width() / d)
         h = image.height() / d * w / (image.width() / d)
         target = QRectF(left + 50, ty - 12, w, h)
@@ -121,6 +123,7 @@ def chat_message(p, y, name, color, lines, image=None, d=1.0):
         p.drawPixmap(target, image, QRectF(image.rect()))
         p.restore()
         ty += h + 4
+        POSTED = QRectF(left, y, 50 + w, ty - y)
     return ty + 14
 
 
@@ -157,7 +160,7 @@ def paint_desktop(d, posted=None):
         indent = metrics.horizontalAdvance(text[: len(text) - len(text.lstrip())])
         LINE_RECTS.append(QRectF(x + indent, baseline - metrics.ascent(),
                                  metrics.horizontalAdvance(text.strip()), metrics.height()))
-        baseline += 31
+        baseline += 40
     p.fillRect(QRectF(LINE_RECTS[-1].right() + 2, LINE_RECTS[-1].top() + 2, 10, metrics.height() - 4),
                QColor("#c9ccd3"))
 
@@ -182,26 +185,101 @@ def paint_desktop(d, posted=None):
 # --- frame helpers ----------------------------------------------------------------
 
 
+def camera_rect(cx, cy, width):
+    """A W:H shaped view of the scene centred on (cx, cy), kept inside the frame."""
+    width = min(width, W)
+    height = width * H / W
+    x = min(max(cx - width / 2, 0), W - width)
+    y = min(max(cy - height / 2, 0), H - height)
+    return QRectF(x, y, width, height)
+
+
+FULL_VIEW = QRectF(0, 0, W, H)
+
+
 class Recorder:
+    """Collects frames. A virtual camera can zoom into part of the scene; captions,
+    badges and the cursor are drawn afterwards so they keep their size."""
+
     def __init__(self, d):
         self.d = d
         self.frames = []
+        self.camera = QRectF(FULL_VIEW)
+        self._move = None  # (from, to, steps, step) while the camera is gliding
+
+    def glide(self, target, steps):
+        self._move = (QRectF(self.camera), target, steps, 0)
+
+    def _advance_camera(self):
+        if self._move is None:
+            return
+        a, b, steps, step = self._move
+        step += 1
+        t = 0.5 - math.cos(math.pi * step / steps) / 2
+        self.camera = QRectF(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
+                             a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t)
+        self._move = None if step >= steps else (a, b, steps, step)
 
     def frame(self, layers, cursor=None, badge=None, caption=None, repeat=1):
-        img = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
-        img.setDevicePixelRatio(self.d)
-        p = QPainter(img)
+        scene = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
+        scene.setDevicePixelRatio(self.d)
+        p = QPainter(scene)
         p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
         for pm, pos in layers:
             p.drawPixmap(QPointF(*pos), pm)
-        if caption:
-            draw_caption(p, caption)
-        if badge:
-            draw_keys(p, badge)
-        if cursor:
-            draw_cursor(p, *cursor)
         p.end()
-        self.frames.extend([img] * repeat)
+        for _ in range(repeat):
+            self._advance_camera()
+            cam, zoom = self.camera, W / self.camera.width()
+            img = QImage(int(W * self.d), int(H * self.d), QImage.Format_RGB32)
+            img.setDevicePixelRatio(self.d)
+            p = QPainter(img)
+            p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+            source = QRectF(cam.x() * self.d, cam.y() * self.d, cam.width() * self.d, cam.height() * self.d)
+            p.drawImage(QRectF(0, 0, W, H), scene, source)
+            if caption:
+                draw_caption(p, caption)
+            if badge:
+                draw_badge(p, badge)
+            if cursor:
+                kind, pos, *size = cursor
+                screen_pos = ((pos[0] - cam.x()) * zoom, (pos[1] - cam.y()) * zoom)
+                draw_cursor(p, kind, screen_pos, (size[0] if size else 0) * zoom)
+            p.end()
+            self.frames.append(img)
+
+
+def draw_badge(p, badge):
+    if isinstance(badge, dict):
+        draw_mouse(p, badge["button"], badge["text"])
+    else:
+        draw_keys(p, badge)
+
+
+def draw_mouse(p, button, text):
+    """Pill at the bottom with a mouse whose `button` side is held down."""
+    p.setFont(font(16, QFont.DemiBold))
+    tw = QFontMetrics(p.font()).horizontalAdvance(text)
+    total = 36 + 30 + 14 + tw + 22
+    rect = QRectF((W - total) / 2, H - 140, total, 70)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(15, 16, 20, 225))
+    p.drawRoundedRect(rect, 16, 16)
+    body = QRectF(rect.left() + 22, rect.top() + 12, 30, 46)
+    half = QRectF(body.center().x() if button == "right" else body.left(), body.top(), body.width() / 2, 20)
+    shape = QPainterPath()
+    shape.addRoundedRect(body, 15, 15)
+    p.save()
+    p.setClipPath(shape)
+    p.fillRect(half, QColor("#2f7bff"))
+    p.restore()
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(QColor("#e8e8e8"), 2))
+    p.drawRoundedRect(body, 15, 15)
+    p.drawLine(QPointF(body.center().x(), body.top()), QPointF(body.center().x(), body.top() + 20))
+    p.drawLine(QPointF(body.left(), body.top() + 20), QPointF(body.right(), body.top() + 20))
+    p.setPen(QColor("#ffffff"))
+    p.drawText(QRectF(body.right() + 14, rect.top(), tw + 10, rect.height()), Qt.AlignVCenter, text)
 
 
 def draw_caption(p, text):
@@ -353,8 +431,8 @@ def main():
     EditorWindow.copy_to_clipboard = lambda self: (self.copied_label.setText("✓ Copied"), self._flash.start())
 
     # 1) Alt+Shift+S and drag over the error.
-    start = (TERMINAL.left() + 12, LINE_RECTS[3].top() - 4)
-    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 8)
+    start = (TERMINAL.left() + 12, LINE_RECTS[3].top() - 8)
+    end = (max(r.right() for r in LINE_RECTS[3:9]) + 20, LINE_RECTS[8].bottom() + 14)
     crop = select_area(rec, desktop, ["Alt", "Shift", "S"], start, end, cursor=(560, 640))
 
     config = Config(json.loads(json.dumps(DEFAULTS)))
@@ -366,10 +444,17 @@ def main():
     QApplication.processEvents()
     vp = editor.canvas.viewport()
 
+    # While the editor is open the desktop behind it is dimmed, so the zoomed-in view stays calm.
+    dim = QPixmap(int(W * d), int(H * d))
+    dim.setDevicePixelRatio(d)
+    dim.fill(QColor(8, 9, 12, 200))
+    window = {}
+
     def editor_layers():
         pm, (cx, cy) = window_chrome(editor.grab(), editor.windowTitle(), d)
         ex, ey = (W - pm.width() / d) / 2, (H - pm.height() / d) / 2 - 40
-        return [(desktop, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
+        window["rect"] = QRectF(ex + 26, ey + 26, pm.width() / d - 52, pm.height() / d - 52)
+        return [(desktop, (0, 0)), (dim, (0, 0)), (pm, (ex, ey))], (ex + cx, ey + cy)
 
     def to_frame(vp_pos):
         _, origin = editor_layers()
@@ -389,12 +474,12 @@ def main():
     def brush(tool=None):
         return editor.canvas.size_for(tool or editor.canvas.tool) * editor.canvas.zoom
 
-    def stroke(points, caption=None, button=Qt.LeftButton, tool=None):
+    def stroke(points, caption=None, button=Qt.LeftButton, tool=None, badge=None):
         points = [to_vp(pt) for pt in points]
         send_mouse(vp, QEvent.MouseButtonPress, points[0], button, button)
         for pt in points[1:]:
             send_mouse(vp, QEvent.MouseMove, pt, Qt.NoButton, button)
-            frame(("brush", to_frame(pt), brush(tool)), caption)
+            frame(("brush", to_frame(pt), brush(tool)), caption, badge=badge)
         send_mouse(vp, QEvent.MouseButtonRelease, points[-1], button, Qt.NoButton)
         return to_frame(points[-1])
 
@@ -402,37 +487,47 @@ def main():
         for i in range(frames):
             frame(("brush", lerp(a, b, (i + 1) / frames), brush(tool)), caption)
 
-    # 2) Circle the wrong line by mistake...
-    frame(("arrow", end), repeat=3)
-    wrong = ellipse_around(LINE_RECTS[5], 16, 9, points=22)
+    # 2) Zoom in on the capture and circle the wrong line by mistake...
+    editor_layers()
+    win = window["rect"]
+    focus = camera_rect(win.center().x(), win.center().y(), 900)
+    rec.glide(focus, 10)
+    frame(("arrow", end), repeat=6)
+    wrong = ellipse_around(LINE_RECTS[5], 16, 10, points=22)
     move(end, to_frame(to_vp(wrong[0])), 6)
-    at = stroke(wrong)
+    at = stroke(wrong, badge={"button": "left", "text": "Drag to draw"})
 
     # ...right-drag wipes the whole stroke...
-    caption = "Wrong line? Right-drag erases the whole stroke"
+    caption = "Wrong line? Erase the whole stroke"
+    right_drag = {"button": "right", "text": "Right-drag"}
     left_edge = (LINE_RECTS[5].left() - 16, LINE_RECTS[5].center().y())
     wipe = [(left_edge[0] - 6 + t * 2, left_edge[1] - 26 + t * 7) for t in range(9)]
-    move(at, to_frame(to_vp(wipe[0])), 6, caption, tool="eraser")
+    move(at, to_frame(to_vp(wipe[0])), 8, caption, tool="eraser")
     editor.canvas.update_cursor("eraser")
-    at = stroke(wipe, caption, button=Qt.RightButton, tool="eraser")
-    frame(("brush", at, brush("eraser")), caption, repeat=6)
+    frame(("brush", to_frame(to_vp(wipe[0])), brush("eraser")), caption, badge=right_drag, repeat=4)
+    at = stroke(wipe, caption, button=Qt.RightButton, tool="eraser", badge=right_drag)
+    frame(("brush", at, brush("eraser")), caption, badge=right_drag, repeat=8)
 
     # ...and circle the real error.
-    right = ellipse_around(LINE_RECTS[8], 18, 5, points=28)
+    right = ellipse_around(LINE_RECTS[8], 18, 10, points=28)
     move(at, to_frame(to_vp(right[0])), 6)
     at = stroke(right)
     editor.copy_to_clipboard()
-    frame(("arrow", at), repeat=10)
+    frame(("arrow", at), repeat=12)
 
-    # 3) Paste into the chat. The editor copied it already.
+    # 3) Zoom back out and paste into the chat. The editor copied it already.
+    rec.glide(QRectF(FULL_VIEW), 10)
     target = (CHAT_INPUT.left() + 150, CHAT_INPUT.center().y())
-    for i in range(10):
-        rec.frame([(desktop, (0, 0))], ("arrow", lerp(at, target, (i + 1) / 10)))
+    for i in range(12):
+        rec.frame([(desktop, (0, 0))], ("arrow", lerp(at, target, (i + 1) / 12)))
     rec.frame([(desktop, (0, 0))], ("arrow", target), badge=["Ctrl", "V"], repeat=8)
     posted = QPixmap.fromImage(editor.canvas.render_image())
     posted.setDevicePixelRatio(d)
     after = paint_desktop(d, posted)
-    rec.frame([(after, (0, 0))], ("arrow", target), caption="Pasted. It was already on your clipboard.", repeat=44)
+    # Frame the whole conversation, leaving room at the top for the caption.
+    top, bottom = CHAT.top() + 38 - 60, POSTED.bottom() + 24
+    rec.glide(camera_rect(CHAT.center().x(), (top + bottom) / 2, (bottom - top) * W / H), 12)
+    rec.frame([(after, (0, 0))], ("arrow", target), caption="Pasted. It was already on your clipboard.", repeat=50)
 
     # --- encode ------------------------------------------------------------------
     tmp = Path(tempfile.mkdtemp(prefix="klipp-demo-"))
