@@ -13,7 +13,7 @@
 - **Just type to add a note.** Point at something and start typing: a label appears right there, as a colored tag that's easy to read, for people and for AI chats alike. Scroll while you type to make it bigger or smaller.
 - **Mistakes are cheap.** Hold the right mouse button and drag to erase whole strokes, whichever tool you're using. Ctrl+Z works too.
 - **Rough is fine.** Pause for a moment at the end of a pen stroke and a wobbly circle, box or line turns into a clean one.
-- **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account and it collects nothing. The only thing it ever contacts is GitHub, once a day, to see whether a new version is out, and you can turn that off in Settings.
+- **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account and it collects nothing. The only thing it ever contacts is GitHub: once a day to see whether a new version is out, which you can turn off in Settings, and to download an update when you press Update.
 
 ## What it does
 
@@ -33,7 +33,9 @@ Klipp runs in the system tray. To have it start with Windows, turn that on in Se
 
 Klipp isn't code-signed yet, so Windows SmartScreen may warn you the first time. Click **More info**, then **Run anyway**.
 
-To update, quit Klipp from the tray icon, replace the folder with the new version and start it again. Your settings are kept.
+To update, click the "new version" notice or **Update to Klipp …** in the tray menu, then **Update**. Klipp downloads the new version, checks it against GitHub's checksum, replaces its folder and starts again. Nothing is downloaded before you press Update. If anything goes wrong, the old version is put back. Your settings are kept.
+
+Versions before 1.5.0 can't update themselves. To update from one of those, quit Klipp from the tray icon, replace the folder with the new version and start it again.
 
 ### Build it yourself
 
@@ -98,7 +100,7 @@ The other settings:
 - Choose how dark the screen gets outside the selection.
 - Pick a folder for saved captures, and optionally save every capture there as a PNG. The default folder is `Pictures\Klipp`.
 - Start with Windows.
-- Get a notice when a new version is out. Klipp asks GitHub once a day and tells you once per version. Clicking the notice opens the download page.
+- Get a notice when a new version is out. Klipp asks GitHub once a day and tells you once per version. Clicking the notice lets you update in one step (see [Install](#install)).
 - Choose what a left-click on the tray icon does.
 
 Settings are stored in `%APPDATA%\Klipp\config.json`. You can edit that file by hand while Klipp isn't running.

@@ -51,6 +51,9 @@ QSlider::groove:horizontal {{ height: 4px; background: #45474d; border-radius: 2
 QSlider::handle:horizontal {{ width: 14px; margin: -6px 0; border-radius: 7px; background: #e8e8e8; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
 
+QProgressBar {{ background: #16171a; border: 1px solid #3a3c42; border-radius: 5px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+
 QToolTip {{ background: #26282c; color: #e8e8e8; border: 1px solid #3a3c42; padding: 4px; }}
 """
 
