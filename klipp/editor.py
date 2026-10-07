@@ -75,6 +75,7 @@ TOOLS = [
 FREEHAND = ("pen", "highlighter")
 HIGHLIGHTER_ALPHA = 110
 MAX_SIZE = 80
+MIN_TEXT_SIZE = 6
 SNAP_DELAY_MS = 450  # how long the pointer must rest at the end of a stroke before it snaps
 
 
@@ -169,9 +170,18 @@ class TextItem(QGraphicsTextItem):
         self.setDefaultTextColor(QColor("#111111") if light_tag else QColor("#ffffff"))
         self.update()
 
+    def state(self):
+        return self.toPlainText(), self.pixel_size(), self.pos()
+
+    def set_state(self, state):
+        text, size, pos = state
+        self.setPlainText(text)
+        self.set_pixel_size(size)
+        self.setPos(pos)
+
     def set_pixel_size(self, size):
         font = QFont("Segoe UI")
-        font.setPixelSize(max(6, round(size)))
+        font.setPixelSize(max(MIN_TEXT_SIZE, round(size)))
         font.setWeight(QFont.DemiBold)
         self.setFont(font)
         self.document().setDocumentMargin(max(2.0, size * 0.22))
@@ -208,18 +218,18 @@ class TextItem(QGraphicsTextItem):
 
 
 class EditText(QUndoCommand):
-    """Changing the words of an existing label."""
+    """Changing the words or the size of an existing label."""
 
     def __init__(self, item, before, after):
         super().__init__("Edit text")
         self.item, self.before, self.after = item, before, after
 
     def redo(self):
-        if self.item.toPlainText() != self.after:
-            self.item.setPlainText(self.after)
+        if self.item.state() != self.after:
+            self.item.set_state(self.after)
 
     def undo(self):
-        self.item.setPlainText(self.before)
+        self.item.set_state(self.before)
 
 
 # --- geometry helpers --------------------------------------------------------
@@ -319,6 +329,7 @@ class Canvas(QGraphicsView):
     zoomChanged = Signal(float)
     snapped = Signal(str)  # a rough stroke was turned into this shape
     finishRequested = Signal()  # embedded: the user clicked outside the selection
+    textSizeChanged = Signal(int)  # scrolling while typing resized the label
 
     def __init__(self, pixmap, dpr, parent=None, region=None, embedded=False, dim=45):
         super().__init__(parent)
@@ -373,7 +384,8 @@ class Canvas(QGraphicsView):
         self._pointer = None  # where the pointer last was, in scene px (new labels start there)
         self._editing = None  # the label being typed into
         self._edit_new = False
-        self._edit_before = ""
+        self._edit_before = None  # the label's state when editing began, for undo
+        self._wheel = 0  # scroll not yet turned into a size step (touchpads send small deltas)
         self._press = None  # embedded: where a left press outside the selection began
 
     # zoom ------------------------------------------------------------------
@@ -416,6 +428,15 @@ class Canvas(QGraphicsView):
             painter.fillPath(outside.subtracted(inside), self.backgroundBrush())
 
     def wheelEvent(self, event):
+        if self._editing is not None and not event.modifiers() & Qt.ControlModifier:
+            # Scrolling while typing makes the label bigger or smaller.
+            self._wheel += event.angleDelta().y()
+            steps = int(self._wheel / 120)
+            self._wheel -= steps * 120
+            if steps:
+                self.step_label_size(steps)
+            event.accept()
+            return
         if self.embedded:
             return
         if event.modifiers() & Qt.ControlModifier:
@@ -500,7 +521,8 @@ class Canvas(QGraphicsView):
         return item
 
     def _begin_edit(self, item, new=False):
-        self._editing, self._edit_new, self._edit_before = item, new, item.toPlainText()
+        self._editing, self._edit_new, self._edit_before = item, new, item.state()
+        self._wheel = 0
         item.done.connect(self.commit_text)
         item.setTextInteractionFlags(Qt.TextEditorInteraction)
         self.setFocus()
@@ -526,13 +548,33 @@ class Canvas(QGraphicsView):
                 self.undo_stack.push(AddItems(self.layer, [item], "Text"))
             else:
                 self.scene().removeItem(item)
-        elif text != self._edit_before:
+        elif item.state() != self._edit_before:
             if text.strip():
-                self.undo_stack.push(EditText(item, self._edit_before, text))
+                self.undo_stack.push(EditText(item, self._edit_before, item.state()))
             else:
-                item.setPlainText(self._edit_before)
+                item.set_state(self._edit_before)
                 self.undo_stack.push(RemoveItems(self.layer, [item]))
         self.setFocus()
+
+    def set_label_size(self, size):
+        """Resize the label being typed, keeping its left edge and vertical centre in place."""
+        item = self._editing
+        middle = item.y() + item.boundingRect().height() / 2
+        item.set_pixel_size(size)
+        item.setY(middle - item.boundingRect().height() / 2)
+
+    def step_label_size(self, steps):
+        """Grow (positive) or shrink the label being typed by mouse-wheel notches. New labels
+        start at the size you end up with."""
+        size = self._editing.pixel_size()
+        for _ in range(abs(steps)):
+            size += max(1, size // 6) if steps > 0 else -max(1, size // 7)
+        size = min(max(size, MIN_TEXT_SIZE), MAX_SIZE)
+        if size == self._editing.pixel_size():
+            return
+        self.set_label_size(size)
+        self.sizes["text"] = size
+        self.textSizeChanged.emit(size)
 
     def undo(self):
         self.commit_text()
@@ -819,6 +861,7 @@ class ToolPanel(QWidget):
         canvas.sizes = dict(config["sizes"])
         canvas.color = QColor(config["color"])
         canvas.snap_enabled = bool(config["snap_shapes"])
+        canvas.textSizeChanged.connect(self._text_size_changed)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
@@ -902,12 +945,21 @@ class ToolPanel(QWidget):
     def select_tool(self, tool):
         self.canvas.tool = tool
         self.tool_buttons[tool].setChecked(True)
-        self.size_slider.blockSignals(True)
-        self.size_slider.setValue(self.canvas.size_for(tool))
-        self.size_slider.blockSignals(False)
-        self.size_label.setText(f"{self.canvas.size_for(tool)} px")
+        self._show_size()
         self.canvas.update_cursor()
         self.config["tool"] = tool
+
+    def _show_size(self):
+        size = self.canvas.size_for(self.canvas.tool)
+        self.size_slider.blockSignals(True)
+        self.size_slider.setValue(size)
+        self.size_slider.blockSignals(False)
+        self.size_label.setText(f"{size} px")
+
+    def _text_size_changed(self, size):
+        if self.canvas.tool == "text":
+            self._show_size()
+        self.config["sizes"] = dict(self.canvas.sizes)
 
     def select_color(self, color):
         self.canvas.color = QColor(color)
@@ -923,7 +975,7 @@ class ToolPanel(QWidget):
     def _size_changed(self, value):
         self.canvas.sizes[self.canvas.tool] = value
         if self.canvas.tool == "text" and self.canvas._editing is not None:
-            self.canvas._editing.set_pixel_size(value)
+            self.canvas.set_label_size(value)
         self.size_label.setText(f"{value} px")
         self.canvas.update_cursor()
         self.config["sizes"] = dict(self.canvas.sizes)
