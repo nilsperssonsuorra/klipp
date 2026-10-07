@@ -10,7 +10,7 @@
 
 - **You draw where you captured.** After Alt+Shift+S, your selection stays on the frozen screen with a toolbar under it. There's no editor window to open, arrange or close.
 - **Ctrl+V is the last step.** It unfreezes the screen and pastes your capture, drawing included, into the window you were in. No Copy button, no saving, no file picker.
-- **Just type to add a note.** Point at something and start typing: a label appears right there, as a colored tag that's easy to read, for people and for AI chats alike.
+- **Just type to add a note.** Point at something and start typing: a label appears right there, as a colored tag that's easy to read, for people and for AI chats alike. Scroll while you type to make it bigger or smaller.
 - **Mistakes are cheap.** Hold the right mouse button and drag to erase whole strokes, whichever tool you're using. Ctrl+Z works too.
 - **Rough is fine.** Pause for a moment at the end of a pen stroke and a wobbly circle, box or line turns into a clean one.
 - **Nothing leaves your PC.** Klipp is free and open source (MIT). There's no account and it collects nothing. The only thing it ever contacts is GitHub, once a day, to see whether a new version is out, and you can turn that off in Settings.
@@ -69,7 +69,8 @@ Drawing works the same on the frozen screen and in the editor window:
 |---|---|
 | **Just start typing** | Write a label where the pointer is, in the current color |
 | Enter or Esc while typing | Finish the label (Shift+Enter starts a new line) |
-| Click a label | Change its words |
+| Scroll while typing | Make the label bigger or smaller. The next label starts at that size. |
+| Click a label | Change its words or, by scrolling, its size |
 | Left-drag | Draw with the current tool |
 | Right-drag | Erase the strokes and labels you touch |
 | Toolbar | Pick a tool, a color or the size. Plain keys type text, so there are no single-key shortcuts. |

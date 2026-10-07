@@ -15,7 +15,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPainter, QPixmap
+from PySide6.QtGui import (
+    QColor,
+    QGuiApplication,
+    QImage,
+    QKeyEvent,
+    QKeySequence,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+    QWheelEvent,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -457,6 +467,13 @@ def point_at(canvas, x, y):
     QApplication.sendEvent(canvas.viewport(), move)
 
 
+def scroll(canvas, x, y, notches, mods=Qt.NoModifier):
+    pos = QPointF(x, y)
+    wheel = QWheelEvent(pos, canvas.viewport().mapToGlobal(pos), QPoint(), QPoint(0, 120 * notches),
+                        Qt.NoButton, mods, Qt.NoScrollPhase, False)
+    QApplication.sendEvent(canvas.viewport(), wheel)
+
+
 def labels(canvas):
     from klipp.editor import TextItem
 
@@ -469,7 +486,8 @@ def test_text_labels():
     # --- in the editor window ---------------------------------------------------
     image = QPixmap(900, 500)
     image.fill(QColor("#ffffff"))
-    win = EditorWindow(image, 1.5, scratch_config(color="#ff3b30", tool="pen"))
+    config = scratch_config(color="#ff3b30", tool="pen")
+    win = EditorWindow(image, 1.5, config)
     win.present()
     QTest.qWait(200)
     canvas = win.canvas
@@ -479,6 +497,27 @@ def test_text_labels():
     check(canvas._editing is not None and canvas._editing.toPlainText() == "fix this",
           "typing starts a label at the pointer")
     check(canvas.tool == "pen", "letters no longer switch tools")
+
+    # Scrolling while typing resizes the label instead of scrolling the view.
+    typing = canvas._editing
+    start_size, middle, zoom = typing.pixel_size(), typing.sceneBoundingRect().center().y(), canvas.zoom
+    scroll(canvas, center.x(), center.y(), 2)
+    check(typing.pixel_size() > start_size and canvas.zoom == zoom, "scrolling while typing makes the label bigger")
+    check(abs(typing.sceneBoundingRect().center().y() - middle) < 1, "the label grows around its middle")
+    check(config["sizes"]["text"] == typing.pixel_size() and canvas.tool == "pen",
+          "the next label starts at the new size; the tool stays the same")
+    scroll(canvas, center.x(), center.y(), -2)
+    check(typing.pixel_size() == start_size, "scrolling back makes it the size it was")
+    for _ in range(30):
+        scroll(canvas, center.x(), center.y(), -1)
+    check(typing.pixel_size() == 6, "labels don't shrink below 6 px")
+    scroll(canvas, center.x(), center.y(), 40)
+    check(typing.pixel_size() == 80, "or grow past 80 px")
+    scroll(canvas, center.x(), center.y(), 1, Qt.ControlModifier)
+    check(canvas.zoom > zoom and typing.pixel_size() == 80, "Ctrl+scroll still zooms while typing")
+    canvas.set_label_size(start_size)
+    canvas.sizes["text"] = start_size
+    canvas.set_zoom(zoom)
     type_into(canvas, win, key=Qt.Key_Return, mods=Qt.ShiftModifier)
     type_into(canvas, win, "please")
     type_into(canvas, win, key=Qt.Key_Return)
@@ -501,6 +540,19 @@ def test_text_labels():
           "clicking a label edits it where you clicked; Esc finishes")
     canvas.undo()
     check("!" not in label.toPlainText(), "the edit undoes on its own")
+
+    # Click a label and scroll to resize it; that undoes too.
+    size = label.pixel_size()
+    at = canvas.mapFromScene(label.sceneBoundingRect().center())
+    QTest.mouseClick(canvas.viewport(), Qt.LeftButton, Qt.NoModifier, at)
+    scroll(canvas, at.x(), at.y(), 3)
+    type_into(canvas, win, key=Qt.Key_Escape)
+    check(canvas._editing is None and label.pixel_size() > size, "scrolling over a label you're editing resizes it")
+    canvas.undo()
+    check(label.pixel_size() == size, "Ctrl+Z puts the old size back")
+    canvas.redo()
+    check(label.pixel_size() > size, "Ctrl+Y makes it bigger again")
+    canvas.undo()
 
     # Right-drag erases a label like a stroke.
     rect = canvas.mapFromScene(label.sceneBoundingRect()).boundingRect()
@@ -544,6 +596,15 @@ def test_text_labels():
     type_into(overlay.canvas, overlay, key=Qt.Key_Escape)
     wait_for(lambda: app.overlay is None)
     check(app.overlay is None, "a second Esc cancels")
+
+    overlay = open_selection()
+    type_into(overlay.canvas, overlay, "big")
+    size = overlay.canvas._editing.pixel_size()
+    scroll(overlay.canvas, 380, 330, 2)
+    check(overlay.canvas._editing.pixel_size() > size, "scrolling while typing on the frozen screen resizes the label")
+    type_into(overlay.canvas, overlay, key=Qt.Key_Escape)
+    type_into(overlay.canvas, overlay, key=Qt.Key_Escape)
+    wait_for(lambda: app.overlay is None)
 
     target = PasteTarget()
     target.show()
