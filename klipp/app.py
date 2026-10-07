@@ -8,14 +8,14 @@ from PySide6.QtCore import QObject, QPoint, QRectF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QCursor, QDesktopServices, QGuiApplication, QPainter
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QWidget
 
-from . import autostart, icons
+from . import __version__, autostart, icons, updates
 from .capture import grab_screen
 from .config import CONFIG_DIR, SETTINGS_KEYS, Config
 from .editor import EditorWindow, save_image_dialog
 from .hotkeys import HotkeyWindow
 from .overlay import SelectionOverlay
 from .settings import SettingsDialog
-from .updates import UpdateChecker
+from .update_dialog import UpdateDialog
 
 MUTEX_NAME = "Local\\Klipp.SingleInstance"
 ERROR_ALREADY_EXISTS = 183
@@ -89,14 +89,15 @@ class KlippApp(QObject):
         self._toast = None
         self._previous_window = None  # window to hand focus back to after a copy capture
         self._paste_into = None  # window to paste into once the frozen screen has gone
-        self._update_url = None  # release page of a newer version, once one is found
+        self._release = None  # a newer version, once one is found
+        self.update_dialog = None
         self._message = None  # what the last tray notification was about, for clicks on it
 
         self.hotkeys = HotkeyWindow()
         self.hotkeys.triggered.connect(self.capture)
         self._build_tray()
         self._register_hotkeys()
-        self.updates = UpdateChecker(self)
+        self.updates = updates.UpdateChecker(self)
         self.updates.found.connect(self._update_available)
         if self.config["check_updates"]:
             self.updates.start()
@@ -116,7 +117,7 @@ class KlippApp(QObject):
         self.tray = QSystemTrayIcon(self.icon, self)
         menu = QMenu()
         self.update_action = menu.addAction("")
-        self.update_action.triggered.connect(self._open_update_page)
+        self.update_action.triggered.connect(self.show_update)
         self.update_action.setVisible(False)
         self.copy_action = menu.addAction("")
         self.copy_action.triggered.connect(lambda: QTimer.singleShot(250, lambda: self.capture("copy")))
@@ -163,24 +164,74 @@ class KlippApp(QObject):
             pass
         self.config["autostart"] = autostart.is_enabled()
 
-    def _update_available(self, version, url):
-        self._update_url = url
-        self.update_action.setText(f"Klipp {version} is available…")
+    def _update_available(self, release):
+        self._release = release
+        self.update_action.setText(f"Update to Klipp {release.version}…")
         self.update_action.setVisible(True)
-        if self.config["notified_version"] != version:  # tell once per version, never nag
-            self.config["notified_version"] = version
+        if self.config["notified_version"] != release.version:  # tell once per version, never nag
+            self.config["notified_version"] = release.version
             self.config.save(["notified_version"])
             self._message = "update"
-            self.tray.showMessage(f"Klipp {version} is available", "Click here to open the download page.",
+            self.tray.showMessage(f"Klipp {release.version} is available", "Click here to update.",
                                   QSystemTrayIcon.Information, 10000)
 
-    def _open_update_page(self):
-        if self._update_url:
-            QDesktopServices.openUrl(QUrl(self._update_url))
+    def show_update(self):
+        """Ask before updating. Nothing is downloaded until the user presses Update."""
+        release, install = self._release, updates.install_dir()
+        if release is None:
+            return
+        if install is None or not release.download_url:  # running from source, or no zip to install
+            QDesktopServices.openUrl(QUrl(release.page))
+            return
+        if self.update_dialog is None:
+            self.update_dialog = UpdateDialog(release, install, self.icon)
+            self.update_dialog.ready.connect(self._install_update)
+            self.update_dialog.finished.connect(self._update_dialog_closed)
+        self.update_dialog.show()
+        self.update_dialog.raise_()
+        self.update_dialog.activateWindow()
+        force_foreground(self.update_dialog)
+
+    def _update_dialog_closed(self):
+        dialog, self.update_dialog = self.update_dialog, None
+        dialog.deleteLater()
+
+    def _install_update(self, exe):
+        """Hand over to the downloaded version. It replaces this one once we've quit."""
+        try:
+            updates.launch(exe, updates.APPLY_FLAG, str(os.getpid()), str(updates.install_dir()))
+        except OSError as error:
+            self.update_dialog.show_error(updates.describe(error))
+            return
+        self.qapp.quit()
+
+    def after_update(self, args):
+        """Started by an update (see updates.py): say how it went and delete the leftovers."""
+        if updates.UPDATED_FLAG in args:
+            self._message = "notes"
+            self.tray.showMessage("Klipp is up to date", f"You now have Klipp {__version__}. Click here to see what's new.",
+                                  QSystemTrayIcon.Information, 10000)
+        elif updates.FAILED_FLAG in args:
+            at = args.index(updates.FAILED_FLAG) + 1
+            reason = args[at] if at < len(args) else ""
+            self.tray.showMessage("Klipp couldn't update", f"{reason}\nYou still have Klipp {__version__}.",
+                                  QSystemTrayIcon.Warning, 10000)
+        else:
+            return
+        install = updates.install_dir()
+        if install is not None:
+            self._clean_up(install, attempts=20)
+
+    def _clean_up(self, install, attempts):
+        # The copy of Klipp.exe that installed this one may take a moment to close.
+        if not updates.clean_up(install) and attempts > 1:
+            QTimer.singleShot(1000, lambda: self._clean_up(install, attempts - 1))
 
     def _message_clicked(self):
         if self._message == "update":
-            self._open_update_page()
+            self.show_update()
+        elif self._message == "notes":
+            QDesktopServices.openUrl(QUrl(f"https://github.com/{updates.REPO}/releases/tag/v{__version__}"))
         self._message = None
 
     def _tray_activated(self, reason):
@@ -348,6 +399,10 @@ def force_foreground(widget):
 
 def main():
     install_error_log()
+    if len(sys.argv) > 3 and sys.argv[1] == updates.APPLY_FLAG:
+        # Before the single-instance check: the old Klipp may still be closing.
+        updates.run_apply(sys.argv[2:])
+        return
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
         return
@@ -358,6 +413,7 @@ def main():
     qapp.setApplicationName("Klipp")
     app = KlippApp(qapp)
     qapp.setWindowIcon(app.icon)
+    app.after_update(sys.argv[1:])
     try:
         sys.exit(qapp.exec())
     finally:

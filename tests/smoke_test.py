@@ -6,10 +6,18 @@ WM_HOTKEY directly, so no real key presses reach other apps.
 """
 
 import ctypes
+import hashlib
+import http.server
+import io
 import json
 import math
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -651,12 +659,14 @@ def test_updates():
     app.tray.showMessage = lambda title, *rest: messages.append(title)
     real_fetch = updates.fetch_latest
     try:
-        updates.fetch_latest = lambda: ("0.0.1", "https://example.invalid/old")
+        updates.fetch_latest = lambda: updates.Release("0.0.1", "https://example.invalid/old", None, 0, None)
         app.updates.check()
         QTest.qWait(300)
         check(not app.update_action.isVisible() and not messages, "an older release is ignored")
 
-        updates.fetch_latest = lambda: ("99.0.0", "https://example.invalid/new")
+        updates.fetch_latest = lambda: updates.Release("99.0.0", "https://example.invalid/new",
+                                                       updates.DOWNLOAD_PREFIX + "v99.0.0/Klipp-99.0.0-windows.zip",
+                                                       1000, None)
         app.updates.check()
         wait_for(lambda: app.update_action.isVisible())
         check(app.update_action.isVisible() and "99.0.0" in app.update_action.text(),
@@ -665,6 +675,33 @@ def test_updates():
         app.updates.check()
         QTest.qWait(300)
         check(len(messages) == 1, "the same version is never announced twice")
+
+        # Clicking the notice or the tray item asks first; running from source, it opens the page.
+        import klipp.app as app_module
+
+        opened, launched, quits = [], [], []
+        real_services, real_install_dir, real_launch = app_module.QDesktopServices, updates.install_dir, updates.launch
+        app_module.QDesktopServices = type("Services", (), {"openUrl": staticmethod(lambda url: opened.append(url.toString()))})
+        try:
+            updates.install_dir = lambda: None
+            app.show_update()
+            check(opened == ["https://example.invalid/new"] and app.update_dialog is None,
+                  "running from source, Update opens the download page")
+            updates.install_dir = lambda: Path(tempfile.gettempdir()) / "Klipp"
+            app.show_update()
+            check(app.update_dialog is not None and app.update_dialog.isVisible() and len(opened) == 1,
+                  "running Klipp.exe, Update asks in a window first")
+            check(not updates.staging_dir(updates.install_dir()).exists(), "nothing is downloaded before you press Update")
+            app.qapp = type("App", (), {"quit": lambda self: quits.append(True)})()
+            updates.launch = lambda *args: launched.append(args)
+            app._install_update("C:/new/Klipp.exe")
+            expected = ("C:/new/Klipp.exe", "--apply-update", str(os.getpid()), str(updates.install_dir()))
+            check(launched == [expected] and quits == [True],
+                  "after the download, the new Klipp.exe is started to swap itself in and this one quits")
+            app.update_dialog.reject()
+        finally:
+            app_module.QDesktopServices, updates.install_dir, updates.launch = real_services, real_install_dir, real_launch
+            app.qapp = QApplication.instance()
 
         def offline():
             raise OSError("no network")
@@ -678,6 +715,155 @@ def test_updates():
     app.hotkeys.unregister_all()
     app.tray.hide()
     print(f"  (running version {__version__})")
+
+
+def serve(files):
+    """Serve `files` ({"/path": bytes}) on localhost, standing in for GitHub's downloads.
+    Returns the base URL, the server and the list of paths requested."""
+    requested = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested.append(self.path)
+            body = files.get(self.path)
+            if body is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_port}/", server, requested
+
+
+def release_zip(marker):
+    """A stand-in release zip, laid out like the real one: Klipp/Klipp.exe and Klipp/_internal."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("Klipp/Klipp.exe", marker)
+        z.writestr("Klipp/_internal/library.txt", marker)
+    return buf.getvalue()
+
+
+def test_update_install():
+    import klipp.updates as updates
+    from klipp.update_dialog import UpdateDialog
+
+    data = {"tag_name": "v9.9.0", "html_url": "https://example.invalid/notes", "assets": [
+        {"name": "Klipp-9.9.0-windows.zip", "size": 10, "digest": "sha256:ABC123", "browser_download_url": "url"}]}
+    release = updates.parse_release(data)
+    check(release.version == "9.9.0" and release.download_url == "url" and release.size == 10
+          and release.sha256 == "abc123", "a release's Windows zip, size and checksum are read from GitHub")
+    data["assets"][0]["name"] = "Something-else.zip"
+    check(updates.parse_release(data).download_url is None, "a release without the Windows zip can't be installed")
+    check(updates.parse_release({**data, "prerelease": True}) is None, "pre-releases are ignored")
+    data = {"tag_name": "v1.4.0", "html_url": "https://example.invalid/notes", "assets": [
+        {"name": "Klipp-1.4.0-windows.zip", "size": 10, "browser_download_url": "url"}]}
+    check(updates.parse_release(data).download_url is None,
+          "versions before 1.5.0 can't swap themselves in, so they're only offered as a download page")
+
+    new_zip = release_zip(b"new")
+    base, server, requested = serve({"/good.zip": new_zip})
+    real_prefix, updates.DOWNLOAD_PREFIX = updates.DOWNLOAD_PREFIX, base
+    root = Path(tempfile.mkdtemp(prefix="klipp-update-test-"))
+    install = root / "Klipp"
+    staging, backup = updates.staging_dir(install), updates.backup_dir(install)
+    exe_path = install / "Klipp.exe"
+
+    def good(sha256=hashlib.sha256(new_zip).hexdigest(), size=len(new_zip)):
+        return updates.Release("9.9.0", "https://example.invalid/notes", base + "good.zip", size, sha256)
+
+    try:
+        seen = []
+        exe = updates.download_release(good(), staging, progress=lambda done, total: seen.append(done))
+        check(exe.read_bytes() == b"new" and (exe.parent / "_internal" / "library.txt").exists()
+              and seen[-1] == len(new_zip), "the release is downloaded and unpacked next to the Klipp folder")
+        for bad, why in ((good(sha256="0" * 64), "a download that doesn't match its checksum is refused"),
+                         (good(size=len(new_zip) + 1), "an incomplete download is refused"),
+                         (updates.Release("9.9.0", "x", "https://example.invalid/Klipp.zip", 1, None),
+                          "downloads from anywhere but GitHub are refused")):
+            try:
+                updates.download_release(bad, staging)
+                check(False, why)
+            except updates.UpdateError:
+                check(True, why)
+
+        # Swapping folders. The new version does this once the old one has closed.
+        install.mkdir()
+        exe_path.write_bytes(b"old")
+        exe = updates.download_release(good(), staging)
+        closed = subprocess.Popen(["cmd", "/c", "exit"])
+        closed.wait()
+        started = []
+        ok = updates.apply_update(exe.parent, install, closed.pid, start=lambda *args: started.append(args))
+        check(ok and exe_path.read_bytes() == b"new" and (install / "_internal" / "library.txt").exists(),
+              "the new version takes the old folder's place")
+        check(started == [(exe_path, updates.UPDATED_FLAG)], "and starts from there")
+        check((backup / "Klipp.exe").read_bytes() == b"old", "the old version is kept until the new one runs")
+        check(updates.clean_up(install) and not staging.exists() and not backup.exists(),
+              "then the new version deletes the leftovers")
+
+        exe_path.write_bytes(b"old")
+        exe = updates.download_release(good(), staging)
+        real_copytree = shutil.copytree
+
+        def disk_full(src, dst, **kwargs):
+            Path(dst).mkdir()
+            (Path(dst) / "Klipp.exe").write_bytes(b"half")
+            raise OSError("The disk is full.")
+
+        shutil.copytree = disk_full
+        started.clear()
+        try:
+            ok = updates.apply_update(exe.parent, install, closed.pid, start=lambda *args: started.append(args))
+        finally:
+            shutil.copytree = real_copytree
+        check(not ok and exe_path.read_bytes() == b"old" and not backup.exists(),
+              "if copying the new version fails, the old one is put back")
+        check(started == [(exe_path, updates.FAILED_FLAG, "The disk is full.")], "and started, saying why")
+
+        running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        started.clear()
+        try:
+            ok = updates.apply_update(exe.parent, install, running.pid, start=lambda *args: started.append(args), wait=0.5)
+        finally:
+            running.kill()
+        check(not ok and exe_path.read_bytes() == b"old" and started[0][1] == updates.FAILED_FLAG,
+              "if the old Klipp doesn't close, nothing is replaced")
+        shutil.rmtree(staging)
+
+        # The window: asks first, then downloads with progress and hands over.
+        requested.clear()
+        dialog = UpdateDialog(good(), install)
+        ready = []
+        dialog.ready.connect(ready.append)
+        dialog.show()
+        QTest.qWait(300)
+        check(not requested and not staging.exists(), "the window downloads nothing until you press Update")
+        dialog.update_button.click()
+        wait_for(lambda: ready, 5000)
+        check(ready and Path(ready[0]).read_bytes() == b"new" and dialog.bar.value() == dialog.bar.maximum(),
+              "Update downloads and unpacks the new version, then hands it over")
+        dialog.close()
+        shutil.rmtree(staging)
+
+        dialog = UpdateDialog(good(sha256="0" * 64), install)
+        dialog.show()
+        dialog.update_button.click()
+        wait_for(lambda: "download page" in dialog.update_button.text(), 5000)
+        check("checksum" in dialog.status.text() and dialog.update_button.isVisible() and not staging.exists(),
+              "a failed update says why, cleans up and offers the download page instead")
+        dialog.close()
+    finally:
+        updates.DOWNLOAD_PREFIX = real_prefix
+        server.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_hotkey_flow():
@@ -734,6 +920,7 @@ if __name__ == "__main__":
     test_finish_gestures()
     test_text_labels()
     test_updates()
+    test_update_install()
     test_hotkey_flow()
     print(f"\n{len(failures)} failure(s)")
     sys.exit(1 if failures else 0)
